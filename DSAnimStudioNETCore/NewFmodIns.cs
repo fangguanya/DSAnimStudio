@@ -217,7 +217,8 @@ namespace DSAnimStudio
 
             Main.WinForm.Invoke(new Action(() =>
             {
-
+                if (!initialised || !_eventSystem.Created)
+                    return;
                 //_eventSystem.set3DListenerAttributes(listener: 0, ref pos, ref vel, ref forward, ref up);Vector3.Transform(
 
                 Vector3 pos = GFX.CurrentWorldView.CameraLocationInWorld_CloserForSound.Position * new Vector3(1, 1, -1);
@@ -253,9 +254,10 @@ namespace DSAnimStudio
                 VECTOR forwardVec = new VECTOR(forward);
 
 
-
-                ERRCHECK(result = _eventSystem.set3DListenerAttributes(0, ref posVec, ref velVec, ref forwardVec, ref upVec));
-
+                if (_eventSystem.Created)
+                {
+                    ERRCHECK(result = _eventSystem.set3DListenerAttributes(0, ref posVec, ref velVec, ref forwardVec, ref upVec));
+                }
 
 
                 //lock (_lock_eventsToUpdate)

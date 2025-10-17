@@ -153,9 +153,9 @@ namespace DSAnimStudio
                 case SoulsGames.DS1:
                 case SoulsGames.DS1R:
                     if (!player)
-                        return new string[] { $"frpg_{chrID}", "frpg_main" };
+                        return new string[] { $"frpg_{chrID}", "frpg_main", $"fdlc_{chrID}", "fdlc_main" };
                     else
-                        return new string[] { "frpg_main" };
+                        return new string[] { "frpg_main", "fdlc_main" };
                 case SoulsGames.DS3:
                     if (!player)
                         return new string[] { $"fdp_{chrID}", "fdp_main", "fdp_main_dlc1", "fdp_main_dlc2" };
