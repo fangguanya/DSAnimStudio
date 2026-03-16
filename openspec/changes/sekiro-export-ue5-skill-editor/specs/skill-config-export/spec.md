@@ -54,8 +54,38 @@
 
 #### 场景:JSON输出结构
 - **当** 完成技能配置导出
-- **那么** JSON 文件必须遵循以下顶层结构：`version`（格式版本）、`gameType`（"SDT"）、`characters`（角色→动画→事件的嵌套结构）、`params`（各参数表数组）
+- **那么** JSON 文件必须遵循以下顶层结构：`version`（格式版本）、`gameType`（"SDT"）、`characters`（角色数组）、`params`（各参数表对象）、`prosthetics`（义手和覆盖配置，可选但一旦存在必须结构化）
+
+#### 场景:JSON数组与字段契约
+- **当** UE5 导入器消费 skill config JSON
+- **那么** `characters` 必须是数组，每个元素至少包含 `id` 和 `animations`；`animations` 必须是数组，每个元素至少包含 `name`、`fileName`、`frameCount`、`frameRate`、`events`
 
 #### 场景:动画ID规范化
 - **当** 导出动画事件数据
-- **那么** 每个动画必须使用 Sekiro 标准命名格式 `aXXX_YYYYYY`（如 `a000_003000`）作为键名，并包含 `frameCount` 和 `fileName` 字段
+- **那么** 每个动画必须使用 Sekiro 标准命名格式 `aXXX_YYYYYY`（如 `a000_003000`）作为 `name` 字段，并包含 `frameCount`、`frameRate` 和 `fileName` 字段；`fileName` 必须与最终导出的动画资产文件名一致
+
+### 需求:事件时间和参数命名一致性
+导出的事件数据必须使用 UE 导入侧可直接消费的帧字段和语义化参数键名。
+
+#### 场景:使用帧域字段而不是秒域字段
+- **当** 导出 TAE 事件
+- **那么** 每个事件必须输出 `startFrame` 和 `endFrame` 字段，数值与源动画帧域一致；不得仅输出 `startTime`、`endTime` 而缺少帧字段
+
+#### 场景:禁止未解释的占位参数名
+- **当** TAE.Template.SDT.xml 中存在参数名称定义
+- **那么** 导出结果必须使用模板定义的参数名；只有模板确实缺失定义时，才允许回退到 `param_<offset>`，并且必须同时输出原始字节偏移和数据类型
+
+### 需求:战斗参数关联可复刻
+技能配置导出不仅要保存原始 TAE 事件，还必须输出足以在 UE 中复刻战斗语义的参数关联。
+
+#### 场景:导出行为到参数表的引用关系
+- **当** 动画包含 AttackBehavior、BulletBehavior、CommonBehavior 或 Sekiro 专有战斗事件
+- **那么** 导出结果必须保留可解析的 `BehaviorJudgeID`、`AtkParamID`、`BulletID`、`SpEffectID`、`DummyPolyID`、`DummyPolySource`、`VariationID` 等关联字段，使 UE 端能够顺着事件 → BehaviorParam → AtkParam/SpEffectParam/EquipParamWeapon 的链路重建战斗含义
+
+#### 场景:导出DummyPoly与义手覆盖关系
+- **当** 事件或参数表引用 DummyPoly，或角色存在义手/战技覆盖配置
+- **那么** 导出结果必须同时给出原始 DummyPoly 索引、覆盖后的 DummyPoly 索引，以及覆盖生效条件；UE 端不能依赖硬编码猜测这些点位
+
+#### 场景:参数表成为正式交付物的一部分
+- **当** 执行单角色或全量技能配置导出
+- **那么** `params` 中必须至少包含 `AtkParam`、`BehaviorParam`、`SpEffectParam`、`EquipParamWeapon` 四类参数；缺少任意一类都不视为完整导出

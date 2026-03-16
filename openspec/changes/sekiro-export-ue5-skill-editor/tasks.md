@@ -1,3 +1,5 @@
+> 状态说明：当前仓库和外部 UE 项目中已经存在大量原型代码，但其中一部分仅证明“代码路径存在”或“可视化跑通”，还不满足本 spec 现在定义的正式完成标准。以下新增的纠偏任务优先级高于前文的历史勾选结果。
+
 ## 1. 环境准备
 
 - [x] 1.1 初始化 Git 子模块（`git submodule update --init --recursive`），确保 SoulsAssetPipeline、SoulsFormats、Havoc 源代码可用
@@ -148,3 +150,20 @@
 - [x] 14.4 验证 AnimSequence 导入正确：8858 个动画资产通过自定义 glTF 解析器创建
 - [ ] 14.5 验证技能编辑器：时间轴、3D 视口、攻击判定框（需在 UE5 编辑器中手动验证）
 - [x] 14.6 测试多个角色完整流程：c1010(349 动画), c1020(289 动画), c9800(151 动画), c9820(161 动画) 等全部成功
+
+## 15. 正式化纠偏任务
+
+- [ ] 15.1 统一导出器与 UE 导入器的 skill config schema，确定唯一 canonical JSON 结构（`characters[]`、`animations[]`、`frameCount`、`frameRate`、`fileName`、`startFrame`、`endFrame`、`params`）并同步更新 C# 与 UE5 两端
+- [ ] 15.2 将 `ParamExporter` 正式接入 CLI 全量导出链，确保 `AtkParam`、`BehaviorParam`、`SpEffectParam`、`EquipParamWeapon` 和义手覆盖配置进入最终 skill config 交付物
+- [ ] 15.3 修复 SkillConfigExporter 的事件时间字段，输出帧域 `startFrame/endFrame`，并补齐 `frameCount/fileName/frameRate`
+- [ ] 15.4 为全部 185 种 TAE 事件建立正式参数名映射；对模板缺失字段输出数据类型与偏移，不允许静默以占位名掩盖缺口
+- [ ] 15.5 梳理模型导出正式格式，确保默认导出只保留可导入 UE 骨骼模型的单一交付物；DAE/其他中间格式仅在 `--keep-intermediates` 下保留
+- [ ] 15.6 验证 FLVER 导出结果在 UE 中确实生成 SkeletalMesh + Skeleton + PhysicsAsset；存在模型输入但未形成骨骼网格时必须判失败
+- [ ] 15.7 修复动画导出/导入契约，确保每个 clip 是单文件完整动画，并与角色 Skeleton 正确绑定；零轨道、错 Skeleton、空动画不得计为成功
+- [ ] 15.8 正规化 UE 自定义 glTF 动画导入器，补齐对正式输入格式的解析约束；若支持 `.glb`，必须实现真实的 GLB 容器解析而非按 JSON 读取
+- [ ] 15.9 收紧 `SekiroValidationCommandlet` 的通过标准：StaticMesh 降级、缺失 Skeleton、缺失 PhysicsAsset、未绑定动画、零轨道动画均应视为错误
+- [ ] 15.10 扩展 `USekiroSkillDataAsset` / 参数缓存层，使 UE 端保存可复刻的结构化战斗数据，而不是仅保存字符串化参数映射
+- [ ] 15.11 让 3D 视口基于真实 DummyPoly、BehaviorParam 和 AtkParam 驱动攻击判定可视化，禁止以 Actor 原点偏移球体替代正式复刻
+- [ ] 15.12 让特效点、音效点、WeaponArt、义手覆盖在属性面板和视口中显示解析后的实际生效结果，而不是仅显示原始事件类别
+- [ ] 15.13 为 CLI 和导入命令增加角色级验收报告，逐角色输出模型、动画、纹理、技能配置、参数表和 UE 资产导入结果，禁止只给总数
+- [ ] 15.14 重新跑全量导出与全量导入，基于新验收标准生成真实统计，替换掉历史上不准确的“全部成功”结论
