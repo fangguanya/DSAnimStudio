@@ -88,11 +88,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="AssimpNet" Version="4.1.0" />
     <PackageReference Include="Blackwood.IO" Version="1.0.0" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
     <PackageReference Include="NAudio" Version="2.1.0" />
     <PackageReference Include="NAudio.Vorbis" Version="1.5.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+    <PackageReference Include="Pfim" Version="0.11.2" />
     <PackageReference Include="RawInput.Sharp" Version="0.0.4" />
     <PackageReference Include="SharpDX.D3DCompiler" Version="4.2.0" />
   </ItemGroup>

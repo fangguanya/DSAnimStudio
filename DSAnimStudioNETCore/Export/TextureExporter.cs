@@ -1,0 +1,269 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using Pfim;
+using SoulsFormats;
+using PfimImageFormat = Pfim.ImageFormat;
+
+namespace DSAnimStudio.Export
+{
+    /// <summary>
+    /// Exports TPF textures to DDS or PNG format.
+    /// Uses Pfim for BC compressed texture decoding (DXT1/DXT3/DXT5/BC4/BC5/BC7).
+    /// </summary>
+    public class TextureExporter
+    {
+        public enum ExportFormat
+        {
+            DDS,
+            PNG
+        }
+
+        public class ExportOptions
+        {
+            public ExportFormat Format { get; set; } = ExportFormat.PNG;
+
+            /// <summary>If true, skip unsupported formats instead of throwing</summary>
+            public bool SkipUnsupported { get; set; } = true;
+        }
+
+        private readonly ExportOptions _options;
+        private readonly List<string> _warnings = new List<string>();
+
+        public IReadOnlyList<string> Warnings => _warnings;
+
+        public TextureExporter(ExportOptions options = null)
+        {
+            _options = options ?? new ExportOptions();
+        }
+
+        /// <summary>
+        /// Export all textures from a TPF archive.
+        /// </summary>
+        public void ExportTpf(TPF tpf, string outputDir,
+            Action<string, int, int> progressCallback = null)
+        {
+            if (!Directory.Exists(outputDir))
+                Directory.CreateDirectory(outputDir);
+
+            var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int total = tpf.Textures.Count;
+
+            for (int i = 0; i < tpf.Textures.Count; i++)
+            {
+                var tex = tpf.Textures[i];
+                progressCallback?.Invoke(tex.Name, i + 1, total);
+
+                try
+                {
+                    string baseName = !string.IsNullOrEmpty(tex.Name) ? tex.Name : $"texture_{i}";
+
+                    // Deduplicate names
+                    string uniqueName = baseName;
+                    int suffix = 1;
+                    while (usedNames.Contains(uniqueName))
+                    {
+                        uniqueName = $"{baseName}_{suffix}";
+                        suffix++;
+                    }
+                    usedNames.Add(uniqueName);
+
+                    if (_options.Format == ExportFormat.DDS)
+                    {
+                        ExportAsDds(tex.Bytes, uniqueName, outputDir);
+                    }
+                    else
+                    {
+                        ExportAsPng(tex.Bytes, uniqueName, outputDir);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    string msg = $"Warning: Failed to export texture '{tex.Name}': {ex.Message}";
+                    _warnings.Add(msg);
+                    System.Diagnostics.Debug.WriteLine(msg);
+
+                    if (!_options.SkipUnsupported)
+                        throw;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Export all textures from a .chrbnd.dcx file (BND4 archive containing TPF).
+        /// </summary>
+        public void ExportFromChrbnd(string chrBndPath, string outputDir,
+            Action<string, int, int> progressCallback = null)
+        {
+            byte[] data = File.ReadAllBytes(chrBndPath);
+
+            // Try to decompress DCX if needed
+            if (DCX.Is(data))
+                data = DCX.Decompress(data);
+
+            if (BND4.Is(data))
+            {
+                var bnd = BND4.Read(data);
+                foreach (var file in bnd.Files)
+                {
+                    if (file.Name != null && file.Name.EndsWith(".tpf", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            byte[] tpfBytes = file.Bytes;
+                            if (DCX.Is(tpfBytes))
+                                tpfBytes = DCX.Decompress(tpfBytes);
+
+                            var tpf = TPF.Read(tpfBytes);
+                            ExportTpf(tpf, outputDir, progressCallback);
+                        }
+                        catch (Exception ex)
+                        {
+                            _warnings.Add($"Warning: Failed to read TPF from '{file.Name}': {ex.Message}");
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Export textures from a standalone .tpf.dcx file.
+        /// </summary>
+        public void ExportFromTpfDcx(string tpfDcxPath, string outputDir,
+            Action<string, int, int> progressCallback = null)
+        {
+            byte[] data = File.ReadAllBytes(tpfDcxPath);
+
+            if (DCX.Is(data))
+                data = DCX.Decompress(data);
+
+            var tpf = TPF.Read(data);
+            ExportTpf(tpf, outputDir, progressCallback);
+        }
+
+        /// <summary>
+        /// Export raw DDS bytes directly to a .dds file.
+        /// </summary>
+        private void ExportAsDds(byte[] ddsBytes, string name, string outputDir)
+        {
+            string outPath = Path.Combine(outputDir, $"{name}.dds");
+            File.WriteAllBytes(outPath, ddsBytes);
+        }
+
+        /// <summary>
+        /// Decode DDS texture using Pfim and export as PNG.
+        /// </summary>
+        private void ExportAsPng(byte[] ddsBytes, string name, string outputDir)
+        {
+            using (var ms = new MemoryStream(ddsBytes))
+            {
+                IImage image;
+                try
+                {
+                    image = Pfimage.FromStream(ms);
+                }
+                catch (Exception ex)
+                {
+                    // Unsupported format (e.g., BC6H)
+                    string msg = $"Warning: Unsupported DDS format for '{name}': {ex.Message}";
+                    _warnings.Add(msg);
+                    if (_options.SkipUnsupported)
+                    {
+                        // Fall back to DDS export
+                        ExportAsDds(ddsBytes, name, outputDir);
+                        return;
+                    }
+                    throw;
+                }
+
+                // Determine pixel format
+                PixelFormat pixelFormat;
+                byte[] pixelData = image.Data;
+
+                switch (image.Format)
+                {
+                    case PfimImageFormat.Rgba32:
+                        pixelFormat = PixelFormat.Format32bppArgb;
+                        // Pfim returns RGBA, System.Drawing needs BGRA
+                        SwapRedBlue32(pixelData, image.Width, image.Height, image.Stride);
+                        break;
+                    case PfimImageFormat.Rgb24:
+                        pixelFormat = PixelFormat.Format24bppRgb;
+                        SwapRedBlue24(pixelData, image.Width, image.Height, image.Stride);
+                        break;
+                    case PfimImageFormat.R5g5b5a1:
+                        pixelFormat = PixelFormat.Format16bppArgb1555;
+                        break;
+                    case PfimImageFormat.R5g5b5:
+                        pixelFormat = PixelFormat.Format16bppRgb555;
+                        break;
+                    case PfimImageFormat.R5g6b5:
+                        pixelFormat = PixelFormat.Format16bppRgb565;
+                        break;
+                    default:
+                        // Unsupported pixel format, fall back to DDS
+                        _warnings.Add($"Warning: Unsupported pixel format '{image.Format}' for '{name}', saving as DDS.");
+                        ExportAsDds(ddsBytes, name, outputDir);
+                        return;
+                }
+
+                // Create bitmap and save as PNG
+                var handle = GCHandle.Alloc(pixelData, GCHandleType.Pinned);
+                try
+                {
+                    var bmp = new Bitmap(image.Width, image.Height, image.Stride, pixelFormat,
+                        handle.AddrOfPinnedObject());
+
+                    string outPath = Path.Combine(outputDir, $"{name}.png");
+                    bmp.Save(outPath, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                finally
+                {
+                    handle.Free();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Swap R and B channels in 32bpp RGBA pixel data (Pfim RGBA → System.Drawing BGRA).
+        /// </summary>
+        private static void SwapRedBlue32(byte[] data, int width, int height, int stride)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                int rowStart = y * stride;
+                for (int x = 0; x < width; x++)
+                {
+                    int offset = rowStart + x * 4;
+                    if (offset + 2 >= data.Length) break;
+                    byte r = data[offset];
+                    data[offset] = data[offset + 2];
+                    data[offset + 2] = r;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Swap R and B channels in 24bpp RGB pixel data.
+        /// </summary>
+        private static void SwapRedBlue24(byte[] data, int width, int height, int stride)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                int rowStart = y * stride;
+                for (int x = 0; x < width; x++)
+                {
+                    int offset = rowStart + x * 3;
+                    if (offset + 2 >= data.Length) break;
+                    byte r = data[offset];
+                    data[offset] = data[offset + 2];
+                    data[offset + 2] = r;
+                }
+            }
+        }
+    }
+}

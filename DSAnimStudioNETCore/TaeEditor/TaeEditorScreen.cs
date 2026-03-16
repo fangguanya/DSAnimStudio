@@ -366,6 +366,287 @@ namespace DSAnimStudio.TaeEditor
             }));
         }
 
+        public void ShowExportModelToFbxDialog()
+        {
+            GameWindowAsForm.Invoke(new Action(() =>
+            {
+                if (!IsFileOpen) return;
+                using (var fbd = new System.Windows.Forms.FolderBrowserDialog())
+                {
+                    fbd.Description = "Select output folder for FBX model export";
+                    if (fbd.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                    {
+                        try
+                        {
+                            string chrBndPath = NewFileContainerName_Model;
+                            if (!string.IsNullOrEmpty(chrBndPath) && File.Exists(chrBndPath))
+                            {
+                                // Load FLVER from CHRBND
+                                byte[] chrData = File.ReadAllBytes(chrBndPath);
+                                if (SoulsFormats.DCX.Is(chrData)) chrData = SoulsFormats.DCX.Decompress(chrData);
+                                var bnd = SoulsFormats.BND4.Read(chrData);
+                                SoulsFormats.FLVER2 flver = null;
+                                foreach (var file in bnd.Files)
+                                {
+                                    string name = file.Name?.ToLower() ?? "";
+                                    if (name.EndsWith(".flver") || name.EndsWith(".flver.dcx"))
+                                    {
+                                        byte[] d = file.Bytes;
+                                        if (SoulsFormats.DCX.Is(d)) d = SoulsFormats.DCX.Decompress(d);
+                                        flver = SoulsFormats.FLVER2.Read(d);
+                                        break;
+                                    }
+                                }
+                                if (flver != null)
+                                {
+                                    var exporter = new Export.FlverToFbxExporter();
+                                    string chrId = Path.GetFileNameWithoutExtension(chrBndPath).Split('.')[0];
+                                    string outputPath = Path.Combine(fbd.SelectedPath, $"{chrId}.fbx");
+                                    exporter.Export(flver, outputPath);
+                                    System.Windows.Forms.MessageBox.Show(
+                                        $"Model exported to:\n{outputPath}",
+                                        "Export Complete",
+                                        System.Windows.Forms.MessageBoxButtons.OK,
+                                        System.Windows.Forms.MessageBoxIcon.Information);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Windows.Forms.MessageBox.Show(
+                                $"Export failed: {ex.Message}",
+                                "Export Error",
+                                System.Windows.Forms.MessageBoxButtons.OK,
+                                System.Windows.Forms.MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            }));
+        }
+
+        public void ShowExportTexturesDialog()
+        {
+            GameWindowAsForm.Invoke(new Action(() =>
+            {
+                if (!IsFileOpen) return;
+                using (var fbd = new System.Windows.Forms.FolderBrowserDialog())
+                {
+                    fbd.Description = "Select output folder for texture export";
+                    if (fbd.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                    {
+                        try
+                        {
+                            var doc = zzz_DocumentManager.CurrentDocument;
+                            var texExporter = new Export.TextureExporter();
+
+                            // Export textures from loaded file path
+                            string filePath = doc?.GameRoot?.InterrootPath;
+                            if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+                            {
+                                if (filePath.EndsWith(".chrbnd.dcx", StringComparison.OrdinalIgnoreCase))
+                                    texExporter.ExportFromChrbnd(filePath, fbd.SelectedPath);
+                                else if (filePath.EndsWith(".tpf.dcx", StringComparison.OrdinalIgnoreCase))
+                                    texExporter.ExportFromTpfDcx(filePath, fbd.SelectedPath);
+                            }
+
+                            System.Windows.Forms.MessageBox.Show(
+                                $"Textures exported to:\n{fbd.SelectedPath}" +
+                                (texExporter.Warnings.Count > 0
+                                    ? $"\n\nWarnings: {texExporter.Warnings.Count}"
+                                    : ""),
+                                "Export Complete",
+                                System.Windows.Forms.MessageBoxButtons.OK,
+                                System.Windows.Forms.MessageBoxIcon.Information);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Windows.Forms.MessageBox.Show(
+                                $"Export failed: {ex.Message}",
+                                "Export Error",
+                                System.Windows.Forms.MessageBoxButtons.OK,
+                                System.Windows.Forms.MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            }));
+        }
+
+        public void ShowExportSkillConfigDialog()
+        {
+            GameWindowAsForm.Invoke(new Action(() =>
+            {
+                if (!IsFileOpen) return;
+                using (var sfd = new System.Windows.Forms.SaveFileDialog())
+                {
+                    sfd.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*";
+                    sfd.FileName = "skill_config.json";
+                    sfd.Title = "Export Skill Config (JSON)";
+                    if (sfd.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                    {
+                        try
+                        {
+                            var skillExporter = new Export.SkillConfigExporter();
+
+                            // Try to load template
+                            string templatePath = Path.Combine(
+                                Main.Directory, "Res", "TAE.Template.SDT.xml");
+                            if (File.Exists(templatePath))
+                                skillExporter.LoadTemplate(templatePath);
+
+                            // Export from current file - load TAE from CHRBND/ANIBND
+                            string bndPath = NewFileContainerName ?? NewFileContainerName_Model;
+                            if (!string.IsNullOrEmpty(bndPath) && File.Exists(bndPath))
+                            {
+                                byte[] bndData = File.ReadAllBytes(bndPath);
+                                if (SoulsFormats.DCX.Is(bndData)) bndData = SoulsFormats.DCX.Decompress(bndData);
+                                var bnd = SoulsFormats.BND4.Read(bndData);
+                                foreach (var file in bnd.Files)
+                                {
+                                    string name = file.Name?.ToLower() ?? "";
+                                    if (name.EndsWith(".tae"))
+                                    {
+                                        byte[] d = file.Bytes;
+                                        if (SoulsFormats.DCX.Is(d)) d = SoulsFormats.DCX.Decompress(d);
+                                        try
+                                        {
+                                            var tae = SoulsAssetPipeline.Animation.TAE.Read(d);
+                                            string chrId = Path.GetFileNameWithoutExtension(bndPath).Split('.')[0];
+                                            skillExporter.ExportToFile(tae, sfd.FileName, chrId);
+                                            break;
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+
+                            System.Windows.Forms.MessageBox.Show(
+                                $"Skill config exported to:\n{sfd.FileName}",
+                                "Export Complete",
+                                System.Windows.Forms.MessageBoxButtons.OK,
+                                System.Windows.Forms.MessageBoxIcon.Information);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Windows.Forms.MessageBox.Show(
+                                $"Export failed: {ex.Message}",
+                                "Export Error",
+                                System.Windows.Forms.MessageBoxButtons.OK,
+                                System.Windows.Forms.MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            }));
+        }
+
+        public void ShowExportAllForUE5Dialog()
+        {
+            GameWindowAsForm.Invoke(new Action(() =>
+            {
+                if (!IsFileOpen) return;
+                using (var fbd = new System.Windows.Forms.FolderBrowserDialog())
+                {
+                    fbd.Description = "Select output root folder for UE5 export (all assets)";
+                    if (fbd.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                    {
+                        try
+                        {
+                            string outputDir = fbd.SelectedPath;
+                            string modelDir = Path.Combine(outputDir, "Model");
+                            string texDir = Path.Combine(outputDir, "Textures");
+                            string skillDir = Path.Combine(outputDir, "Skills");
+
+                            string chrBndPath = NewFileContainerName_Model;
+                            string chrId = "model";
+
+                            // Export model + textures from CHRBND
+                            if (!string.IsNullOrEmpty(chrBndPath) && File.Exists(chrBndPath))
+                            {
+                                chrId = Path.GetFileNameWithoutExtension(chrBndPath).Split('.')[0];
+                                byte[] chrData = File.ReadAllBytes(chrBndPath);
+                                if (SoulsFormats.DCX.Is(chrData)) chrData = SoulsFormats.DCX.Decompress(chrData);
+                                var bnd = SoulsFormats.BND4.Read(chrData);
+
+                                SoulsFormats.FLVER2 flver = null;
+                                SoulsAssetPipeline.Animation.TAE tae = null;
+                                var tpfDataList = new List<byte[]>();
+
+                                foreach (var file in bnd.Files)
+                                {
+                                    string name = file.Name?.ToLower() ?? "";
+                                    if (name.EndsWith(".flver") || name.EndsWith(".flver.dcx"))
+                                    {
+                                        byte[] d = file.Bytes;
+                                        if (SoulsFormats.DCX.Is(d)) d = SoulsFormats.DCX.Decompress(d);
+                                        flver = SoulsFormats.FLVER2.Read(d);
+                                    }
+                                    else if (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx"))
+                                    {
+                                        byte[] d = file.Bytes;
+                                        if (SoulsFormats.DCX.Is(d)) d = SoulsFormats.DCX.Decompress(d);
+                                        tpfDataList.Add(d);
+                                    }
+                                    else if (name.EndsWith(".tae"))
+                                    {
+                                        byte[] d = file.Bytes;
+                                        if (SoulsFormats.DCX.Is(d)) d = SoulsFormats.DCX.Decompress(d);
+                                        try { tae = SoulsAssetPipeline.Animation.TAE.Read(d); } catch { }
+                                    }
+                                }
+
+                                if (flver != null)
+                                {
+                                    Directory.CreateDirectory(modelDir);
+                                    var fbxExporter = new Export.FlverToFbxExporter();
+                                    fbxExporter.Export(flver, Path.Combine(modelDir, $"{chrId}.fbx"));
+                                    var matExporter = new Export.MaterialManifestExporter();
+                                    matExporter.ExportToFile(flver, Path.Combine(modelDir, "material_manifest.json"));
+                                }
+
+                                if (tpfDataList.Count > 0)
+                                {
+                                    Directory.CreateDirectory(texDir);
+                                    var texExporter = new Export.TextureExporter();
+                                    foreach (var tpfData in tpfDataList)
+                                    {
+                                        try
+                                        {
+                                            var tpf = SoulsFormats.TPF.Read(tpfData);
+                                            texExporter.ExportTpf(tpf, texDir);
+                                        }
+                                        catch { }
+                                    }
+                                }
+
+                                if (tae != null)
+                                {
+                                    Directory.CreateDirectory(skillDir);
+                                    var skillExporter = new Export.SkillConfigExporter();
+                                    string templatePath = Path.Combine(Main.Directory, "Res", "TAE.Template.SDT.xml");
+                                    if (File.Exists(templatePath))
+                                        skillExporter.LoadTemplate(templatePath);
+                                    skillExporter.ExportToFile(tae, Path.Combine(skillDir, "skill_config.json"), chrId);
+                                }
+                            }
+
+                            System.Windows.Forms.MessageBox.Show(
+                                $"All assets exported to:\n{outputDir}",
+                                "UE5 Export Complete",
+                                System.Windows.Forms.MessageBoxButtons.OK,
+                                System.Windows.Forms.MessageBoxIcon.Information);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Windows.Forms.MessageBox.Show(
+                                $"Export failed: {ex.Message}",
+                                "Export Error",
+                                System.Windows.Forms.MessageBoxButtons.OK,
+                                System.Windows.Forms.MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            }));
+        }
+
         public void ImmediateExportAllEventsToTextFile(string textFilePath)
         {
             var sb = new StringBuilder();

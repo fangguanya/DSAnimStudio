@@ -86,10 +86,37 @@ namespace DSAnimStudio.ImguiOSD
                 
                 ImGui.Separator();
 
+                // === Sekiro Export Tools ===
+                if (ClickItem("Export Model to FBX...", enabled: Tae?.IsFileOpen == true && !zzz_DocumentManager.CurrentDocument.LoadingTaskMan.AnyInteractionBlockingTasks()))
+                    Main.MainThreadLazyDispatch(() =>
+                    {
+                        Tae.ShowExportModelToFbxDialog();
+                    });
+
+                if (ClickItem("Export Textures...", enabled: Tae?.IsFileOpen == true && !zzz_DocumentManager.CurrentDocument.LoadingTaskMan.AnyInteractionBlockingTasks()))
+                    Main.MainThreadLazyDispatch(() =>
+                    {
+                        Tae.ShowExportTexturesDialog();
+                    });
+
+                if (ClickItem("Export Skill Config (JSON)...", enabled: Tae?.IsFileOpen == true && !zzz_DocumentManager.CurrentDocument.LoadingTaskMan.AnyInteractionBlockingTasks()))
+                    Main.MainThreadLazyDispatch(() =>
+                    {
+                        Tae.ShowExportSkillConfigDialog();
+                    });
+
+                if (ClickItem("Export All for UE5...", enabled: Tae?.IsFileOpen == true && !zzz_DocumentManager.CurrentDocument.LoadingTaskMan.AnyInteractionBlockingTasks()))
+                    Main.MainThreadLazyDispatch(() =>
+                    {
+                        Tae.ShowExportAllForUE5Dialog();
+                    });
+
+                ImGui.Separator();
+
                 Main.Config.EnableGameDataIOLogging = Checkbox(
                     "Enable GameData Logging",
                     Main.Config.EnableGameDataIOLogging);
-                
+
                 ImGui.EndMenu();
             }
             
