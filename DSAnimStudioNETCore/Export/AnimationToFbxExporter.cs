@@ -29,8 +29,8 @@ namespace DSAnimStudio.Export
             /// <summary>If true, bake root motion into root bone keyframes</summary>
             public bool BakeRootMotion { get; set; } = true;
 
-            /// <summary>Export format ID for Assimp (default "collada" since FBX fails for large bone counts)</summary>
-            public string ExportFormatId { get; set; } = "collada";
+            /// <summary>Export format ID for Assimp (default "fbx" for UE5 compatibility; collada fallback if FBX fails)</summary>
+            public string ExportFormatId { get; set; } = "fbx";
         }
 
         private readonly ExportOptions _options;
@@ -110,19 +110,61 @@ namespace DSAnimStudio.Export
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                // Use correct extension for format
-                string actualPath = outputPath;
-                if (_options.ExportFormatId == "collada" && !outputPath.EndsWith(".dae", StringComparison.OrdinalIgnoreCase))
-                    actualPath = Path.ChangeExtension(outputPath, ".dae");
-
-                bool success = ctx.ExportFile(scene, actualPath, _options.ExportFormatId);
-                if (!success && _options.ExportFormatId != "collada")
+                // Try formats in order: FBX → glTF2 → Collada (fallback)
+                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2", "collada" };
+                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb", ".dae" };
+                bool success = false;
+                for (int i = 0; i < formatsToTry.Length; i++)
                 {
-                    // Fallback to Collada
-                    actualPath = Path.ChangeExtension(outputPath, ".dae");
-                    ctx.ExportFile(scene, actualPath, "collada");
+                    string fmt = formatsToTry[i];
+                    string tryPath = Path.ChangeExtension(outputPath, extensions[i]);
+                    try
+                    {
+                        success = ctx.ExportFile(scene, tryPath, fmt);
+                        if (success)
+                        {
+                            // Post-process: fix absolute buffer URIs in glTF files
+                            if (tryPath.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase))
+                                FixGltfBufferUris(tryPath);
+                            break;
+                        }
+                    }
+                    catch { }
                 }
             }
+        }
+
+        /// <summary>
+        /// Fix Assimp's glTF2 exporter writing absolute paths for buffer URIs.
+        /// </summary>
+        private static void FixGltfBufferUris(string gltfPath)
+        {
+            try
+            {
+                string json = File.ReadAllText(gltfPath);
+                bool modified = false;
+                var lines = json.Split('\n');
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string line = lines[i];
+                    int uriIdx = line.IndexOf("\"uri\"", StringComparison.Ordinal);
+                    if (uriIdx < 0) continue;
+                    int firstQuote = line.IndexOf('"', uriIdx + 5);
+                    if (firstQuote < 0) continue;
+                    int secondQuote = line.IndexOf('"', firstQuote + 1);
+                    if (secondQuote < 0) continue;
+                    string uri = line.Substring(firstQuote + 1, secondQuote - firstQuote - 1);
+                    if (uri.Length > 2 && (uri[1] == ':' || uri[0] == '/'))
+                    {
+                        string filename = Path.GetFileName(uri.Replace('\\', '/'));
+                        lines[i] = line.Substring(0, firstQuote + 1) + filename + line.Substring(secondQuote);
+                        modified = true;
+                    }
+                }
+                if (modified)
+                    File.WriteAllText(gltfPath, string.Join("\n", lines));
+            }
+            catch { }
         }
 
         /// <summary>

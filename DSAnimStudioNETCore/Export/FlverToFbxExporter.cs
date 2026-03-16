@@ -22,8 +22,8 @@ namespace DSAnimStudio.Export
             /// <summary>If true, flip Z axis for right-hand to left-hand conversion</summary>
             public bool ConvertCoordinateSystem { get; set; } = false;
 
-            /// <summary>Export format ID for Assimp (default "collada" as FBX has issues with large bone counts)</summary>
-            public string ExportFormatId { get; set; } = "collada";
+            /// <summary>Export format ID for Assimp (default "fbx" for UE5 compatibility; collada fallback if FBX fails)</summary>
+            public string ExportFormatId { get; set; } = "fbx";
         }
 
         private readonly ExportOptions _options;
@@ -111,27 +111,77 @@ namespace DSAnimStudio.Export
                     if (faceOOR) Console.WriteLine($"        WARNING: face indices out of range!");
                 }
 
-                // Try different formats
-                string[] formatsToTry = { _options.ExportFormatId, "collada", "obj" };
+                // Try formats in order: FBX (best UE5 compat) → glTF2 (UE5 Interchange) → Collada (fallback)
+                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2", "collada" };
+                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb", ".dae" };
                 bool exported = false;
-                foreach (var fmt in formatsToTry)
+                string exportedPath = null;
+                for (int i = 0; i < formatsToTry.Length; i++)
                 {
-                    string tryPath = fmt == _options.ExportFormatId
-                        ? outputPath
-                        : Path.ChangeExtension(outputPath, fmt == "collada" ? ".dae" : ".obj");
-                    bool result = ctx.ExportFile(scene, tryPath, fmt);
-                    Console.WriteLine($"    Export format '{fmt}': {(result ? "SUCCESS" : "FAILED")} -> {tryPath}");
-                    if (result) { exported = true; break; }
+                    string fmt = formatsToTry[i];
+                    string tryPath = Path.ChangeExtension(outputPath, extensions[i]);
+                    try
+                    {
+                        bool result = ctx.ExportFile(scene, tryPath, fmt);
+                        Console.WriteLine($"    Export format '{fmt}': {(result ? "SUCCESS" : "FAILED")} -> {tryPath}");
+                        if (result) { exported = true; exportedPath = tryPath; break; }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"    Export format '{fmt}': EXCEPTION -> {ex.Message}");
+                    }
                 }
                 if (!exported)
+                    throw new Exception("All export formats failed (fbx, fbxa, gltf2, glb2, collada)");
+
+                // Post-process: fix absolute buffer URIs in glTF files
+                if (exportedPath != null && exportedPath.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase))
+                    FixGltfBufferUris(exportedPath);
+            }
+        }
+
+        /// <summary>
+        /// Fix Assimp's glTF2 exporter writing absolute paths for buffer URIs.
+        /// Converts them to relative filenames so UE5 Interchange can resolve them.
+        /// </summary>
+        private static void FixGltfBufferUris(string gltfPath)
+        {
+            try
+            {
+                string json = File.ReadAllText(gltfPath);
+                bool modified = false;
+
+                // Simple regex-free approach: find "uri": "..." entries with absolute paths
+                var lines = json.Split('\n');
+                for (int i = 0; i < lines.Length; i++)
                 {
-                    // Try fbx without bones
-                    foreach (var m in scene.Meshes) m.Bones.Clear();
-                    bool noBoneResult = ctx.ExportFile(scene, outputPath, _options.ExportFormatId);
-                    Console.WriteLine($"    Export fbx without bones: {(noBoneResult ? "SUCCESS" : "FAILED")}");
-                    if (!noBoneResult)
-                        throw new Exception("All export formats failed");
+                    string line = lines[i];
+                    int uriIdx = line.IndexOf("\"uri\"", StringComparison.Ordinal);
+                    if (uriIdx < 0) continue;
+
+                    // Extract the URI value
+                    int firstQuote = line.IndexOf('"', uriIdx + 5);
+                    if (firstQuote < 0) continue;
+                    int secondQuote = line.IndexOf('"', firstQuote + 1);
+                    if (secondQuote < 0) continue;
+
+                    string uri = line.Substring(firstQuote + 1, secondQuote - firstQuote - 1);
+
+                    // Check if it's an absolute path (contains drive letter or starts with /)
+                    if (uri.Length > 2 && (uri[1] == ':' || uri[0] == '/'))
+                    {
+                        string filename = Path.GetFileName(uri.Replace('\\', '/'));
+                        lines[i] = line.Substring(0, firstQuote + 1) + filename + line.Substring(secondQuote);
+                        modified = true;
+                    }
                 }
+
+                if (modified)
+                    File.WriteAllText(gltfPath, string.Join("\n", lines));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    Warning: failed to fix glTF buffer URIs: {ex.Message}");
             }
         }
 

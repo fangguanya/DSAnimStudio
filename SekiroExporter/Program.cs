@@ -272,13 +272,15 @@ namespace SekiroExporter
             if (flver != null && flver.Meshes.Count > 0)
             {
                 Directory.CreateDirectory(modelDir);
-                string modelPath = Path.Combine(modelDir, $"{chrId}.dae");
+                string modelPath = Path.Combine(modelDir, $"{chrId}.fbx");
                 try
                 {
                     var fbxExporter = new FlverToFbxExporter();
                     fbxExporter.Export(flver, modelPath);
-                    if (File.Exists(modelPath))
-                        Console.WriteLine($"  ✓ Model: {chrId}.dae ({new FileInfo(modelPath).Length / 1024}KB)");
+                    // Check for the actual output file (format may have fallen back to .gltf/.glb/.dae)
+                    string actualModelFile = FindExportedFile(modelDir, chrId, new[] { ".fbx", ".gltf", ".glb", ".dae" });
+                    if (actualModelFile != null)
+                        Console.WriteLine($"  ✓ Model: {Path.GetFileName(actualModelFile)} ({new FileInfo(actualModelFile).Length / 1024}KB)");
                     else
                         Console.Error.WriteLine($"  ✗ Model: export returned but file missing!");
                 }
@@ -355,8 +357,12 @@ namespace SekiroExporter
                         });
                     Console.WriteLine();
 
-                    int animCount = Directory.GetFiles(animDir, "*.*").Length;
-                    Console.WriteLine($"  ✓ Animations: {animCount} files exported");
+                    // Post-process: merge per-bone glTF animations into single clips
+                    int mergedCount = GltfAnimationMerger.MergeAllInDirectory(animDir);
+                    int animCount = Directory.GetFiles(animDir, "*.gltf").Length
+                        + Directory.GetFiles(animDir, "*.fbx").Length
+                        + Directory.GetFiles(animDir, "*.dae").Length;
+                    Console.WriteLine($"  ✓ Animations: {animCount} clips exported ({mergedCount} glTF merged)");
                 }
                 catch (Exception ex)
                 {
@@ -520,6 +526,17 @@ namespace SekiroExporter
             int converted = DaeToFbxConverter.ConvertDirectory(dir, delete);
             Console.WriteLine($"Done. {converted} files converted.");
             return 0;
+        }
+
+        /// <summary>Find the actual exported file, checking multiple possible extensions.</summary>
+        static string FindExportedFile(string dir, string baseName, string[] extensions)
+        {
+            foreach (var ext in extensions)
+            {
+                string path = Path.Combine(dir, baseName + ext);
+                if (File.Exists(path)) return path;
+            }
+            return null;
         }
 
         static string GetRequired(Dictionary<string, string> args, string key)
