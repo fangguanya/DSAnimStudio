@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp -r \"E:/Sekiro/DSAnimStudio/.claude/worktrees/naughty-hermann/.claude/commands\" \"E:/Sekiro/DSAnimStudio/.claude/\")",
+      "Bash(cp -r \"E:/Sekiro/DSAnimStudio/.claude/worktrees/naughty-hermann/.claude/skills\" \"E:/Sekiro/DSAnimStudio/.claude/\")",
+      "Bash(cp -r \"E:/Sekiro/DSAnimStudio/.claude/worktrees/naughty-hermann/openspec\" \"E:/Sekiro/DSAnimStudio/\")",
+      "Bash(rm -rf .claude/worktrees/goofy-carson)",
+      "Bash(rm -rf .claude/worktrees/naughty-hermann)",
+      "Bash(cmd.exe /c \"rmdir /s /q E:\\\\Sekiro\\\\DSAnimStudio\\\\.claude\\\\worktrees\\\\naughty-hermann\")",
+      "Bash(cmd.exe /c \"rmdir /s /q E:\\\\Sekiro\\\\DSAnimStudio\\\\.claude\\\\worktrees\\\\goofy-carson\")",
+      "Bash(tasklist)",
+      "Bash(powershell -Command \"Get-ChildItem ''E:\\\\Sekiro\\\\DSAnimStudio\\\\.claude\\\\worktrees\\\\naughty-hermann'' -Force -ErrorAction SilentlyContinue | Select-Object Name, Attributes\")"
+    ]
+  }
+}
