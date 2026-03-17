@@ -91,6 +91,7 @@ namespace DSAnimStudio.Export
             // Build skeleton node tree
             var boneNodes = BuildSkeletonFromHkx(skeleton, scene.RootNode);
             AssimpExportTransformUtils.LogSkeletonSelfCheck("HKX", boneNodes);
+            string formalSkeletonRootName = ResolveFormalSkeletonRootName(boneNodes, scene.RootNode);
 
             if (sceneFlvers == null || !sceneFlvers.Any(f => f?.Meshes != null && f.Meshes.Count > 0))
                 throw new InvalidOperationException("Formal animation export requires real FLVER meshes; synthetic carrier meshes are not allowed.");
@@ -139,7 +140,7 @@ namespace DSAnimStudio.Export
                 if (!success)
                     throw new Exception($"Formal animation export failed for '{animName}' using glTF 2.0.");
 
-                FixGltfBufferUris(exportedPath);
+                FixGltfBufferUris(exportedPath, formalSkeletonRootName);
 
                 if (exportedPath != null)
                     Console.WriteLine($"    Animation exported: {Path.GetFileName(exportedPath)}");
@@ -149,10 +150,31 @@ namespace DSAnimStudio.Export
         /// <summary>
         /// Fix Assimp's glTF2 exporter writing absolute paths for buffer URIs.
         /// </summary>
-        private static void FixGltfBufferUris(string gltfPath)
+        private static void FixGltfBufferUris(string gltfPath, string formalSkeletonRootName)
         {
             string animationName = Path.GetFileNameWithoutExtension(gltfPath);
-            GltfPostProcessor.PostProcess(gltfPath, animationName);
+            GltfWriterPostProcessor.PostProcess(gltfPath, formalSkeletonRootName, animationName);
+        }
+
+        private static string ResolveFormalSkeletonRootName(IReadOnlyList<Node> boneNodes, Node sceneRoot)
+        {
+            if (boneNodes == null || boneNodes.Count == 0)
+                throw new InvalidOperationException("Formal animation export produced no skeleton nodes.");
+
+            var rootCandidates = boneNodes
+                .Where(node => node != null && node.Parent == sceneRoot)
+                .ToList();
+
+            var selected = rootCandidates
+                .FirstOrDefault(node => !string.Equals(node.Name, "Armature", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(node.Name, "RootNode", StringComparison.OrdinalIgnoreCase))
+                ?? rootCandidates.FirstOrDefault()
+                ?? boneNodes.FirstOrDefault(node => node != null);
+
+            if (selected == null || string.IsNullOrWhiteSpace(selected.Name))
+                throw new InvalidOperationException("Formal animation export could not resolve a declared skeleton root name.");
+
+            return selected.Name;
         }
 
         /// <summary>
@@ -179,10 +201,7 @@ namespace DSAnimStudio.Export
 
             // Collect HKX animation files
             var animFiles = bnd.Files
-                .Where(f => f.Name != null &&
-                    (f.Name.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase) ||
-                     f.Name.EndsWith(".hkx.dcx", StringComparison.OrdinalIgnoreCase)) &&
-                    f.ID != 7000000)
+                .Where(IsFormalAnimationBinderEntry)
                 .ToList();
 
             if (!string.IsNullOrWhiteSpace(animationFilter))
@@ -229,6 +248,22 @@ namespace DSAnimStudio.Export
             if (normalized.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase))
                 normalized = normalized.Substring(0, normalized.Length - 4);
             return normalized;
+        }
+
+        private static bool IsFormalAnimationBinderEntry(BinderFile file)
+        {
+            if (file?.Name == null || file.ID == 7000000)
+                return false;
+
+            if (!file.Name.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase)
+                && !file.Name.EndsWith(".hkx.dcx", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            const int animBindIdMin = 1000000000;
+            const int animBindIdMax = animBindIdMin + 999999999;
+            return file.ID >= animBindIdMin && file.ID <= animBindIdMax;
         }
 
         /// <summary>
@@ -363,7 +398,8 @@ namespace DSAnimStudio.Export
                     }
 
                     assimpMesh.MaterialIndex = scene.Materials.IndexOf(material);
-                    if (assimpMesh.MaterialIndex < 0)
+                        assimpMesh.MaterialIndex = (int)scene.Materials.IndexOf(material);
+                        if (assimpMesh.MaterialIndex < 0)
                     {
                         scene.Materials.Add(material);
                         assimpMesh.MaterialIndex = (int)scene.Materials.Count - 1;
@@ -372,7 +408,7 @@ namespace DSAnimStudio.Export
                     scene.Meshes.Add(assimpMesh);
 
                     var meshNode = new Node($"Mesh_{meshIdx}", scene.RootNode);
-                    meshNode.MeshIndices.Add(scene.Meshes.Count - 1);
+                    meshNode.MeshIndices.Add((int)scene.Meshes.Count - 1);
                     scene.RootNode.Children.Add(meshNode);
                     meshIdx++;
                 }

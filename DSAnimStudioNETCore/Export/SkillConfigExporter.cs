@@ -23,7 +23,7 @@ namespace DSAnimStudio.Export
             public JObject Params { get; set; }
             public JObject Prosthetics { get; set; }
             public IReadOnlyList<FLVER2> ModelFlvers { get; set; }
-            public Func<string, string> ResolveAnimationFileName { get; set; }
+            public Func<TAE.Animation, FormalAnimationResolution> ResolveAnimation { get; set; }
         }
 
         /// <summary>
@@ -165,22 +165,20 @@ namespace DSAnimStudio.Export
             foreach (var anim in tae.Animations)
             {
                 string animName = FormatAnimationKey(anim.ID);
-                string sourceAnimFileName = GetSourceAnimationFileName(anim);
-                string resolutionKey = NormalizeAnimationReference(sourceAnimFileName);
-                if (string.IsNullOrWhiteSpace(resolutionKey))
-                    resolutionKey = animName;
+                var resolution = context.ResolveAnimation?.Invoke(anim);
+                if (resolution == null)
+                    throw new InvalidOperationException($"Formal skill export requires a shared animation resolution for '{animName}'.");
 
-                string resolvedFileName = context.ResolveAnimationFileName?.Invoke(resolutionKey);
-                if (string.IsNullOrWhiteSpace(resolvedFileName))
-                    throw new InvalidOperationException($"Formal skill export requires a matching exported animation deliverable for '{animName}' (resolved via '{resolutionKey}').");
+                string sourceAnimFileName = GetSourceAnimationFileName(anim);
 
                 var animObj = new JObject
                 {
                     ["id"] = anim.ID,
                     ["name"] = animName,
-                    ["fileName"] = Path.GetFileName(resolvedFileName),
+                    ["fileName"] = Path.GetFileName(resolution.DeliverableAnimFileName),
                     ["frameRate"] = context.FrameRate,
                     ["frameCount"] = ResolveFrameCount(anim, context.FrameRate),
+                    ["animationResolution"] = resolution.ToJson(),
                 };
 
                 if (!string.IsNullOrWhiteSpace(sourceAnimFileName))
@@ -408,21 +406,6 @@ namespace DSAnimStudio.Export
                 return importHeader.AnimFileName ?? string.Empty;
 
             return string.Empty;
-        }
-
-        private static string NormalizeAnimationReference(string animationReference)
-        {
-            if (string.IsNullOrWhiteSpace(animationReference))
-                return string.Empty;
-
-            string normalized = Path.GetFileNameWithoutExtension(animationReference.Trim());
-            if (normalized.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase)
-                || normalized.EndsWith(".hkt", StringComparison.OrdinalIgnoreCase))
-            {
-                normalized = Path.GetFileNameWithoutExtension(normalized);
-            }
-
-            return normalized;
         }
 
         private static int ResolveFrameCount(TAE.Animation anim, float frameRate)

@@ -176,6 +176,23 @@ DSAnimStudio 的预览链路允许通过 `ChrAsm`、`SkeletonMapper` 和 `BoneGl
 
 任何一步出现歧义、缺失或需要名称猜测，都属于正式失败，而不是兼容成功。
 
+### 主角多 TAE 文件身份规则
+
+Sekiro 主角 `c0000.anibnd.dcx` 不是单一 TAE 文件容器。编辑器现有语义会先按每个 TAE binder file 的 `taeBindIndex` 建 category，再把动画条目标识建模为 `SplitAnimID(category, subId)`，也就是 full ID：
+
+- `full_tae_id = taeBindIndex * 1_000000 + local_tae_id`
+- `request_tae_id` / `resolved_tae_id` / `resolved_hkx_id` 在主角链路里都必须使用这个 full-ID 语义
+- `ImportOtherAnim.ImportFromAnimID` 与 `Standard.ImportHKXSourceAnimID` 也必须按同一 full-ID 语义解释
+
+因此，正式链路禁止把多个主角 TAE 文件先 merge 成“只有本地 `TAE.Animation.ID`”的扁平集合，再按裸 `aXXX_YYYYYY` 过滤。这样会把不同 category 下的同名条目压成同一个候选，直接破坏编辑器已有的解析模型。
+
+允许的做法只有两种：
+
+- 在 merge 前先把主角本地 TAE ID 规范化为 full ID，再统一求解
+- 或者完全保留 source TAE/bind 上下文，在未扁平化的情况下按 `SplitAnimID` 求解
+
+两种做法都必须保证正式导出与编辑器里的 `SAFE_SolveAnimRefChain(...)` / `GetHkxID(...)` 语义一致。
+
 ### formal assembly profile
 
 多部件角色不能继续以“当前看到什么就导出什么”的方式定义正式模型。formal assembly profile 至少需要冻结以下维度：
@@ -196,6 +213,35 @@ DSAnimStudio 的预览链路允许通过 `ChrAsm`、`SkeletonMapper` 和 `BoneGl
 - 正式交付物中的 buffer URI、mesh root 和 scene root 必须在不依赖额外猜测的前提下可由 UE 导入器消费
 
 这里的“formal skeleton root”不是 DSAnimStudio 某次预览会话里的任意根节点，而是 formal assembly profile 明确声明的主骨架根。
+
+### 当前实现中的 scene-side / writer-side 分类
+
+为了把 `GltfPostProcessor` 从“事后补丁层”收敛为受控的 writer normalization，当前实现明确区分了两类责任：
+
+- scene-side（已前移到导出构建阶段）
+	- formal assembly profile 的选择与报告记录
+	- formal animation resolution 的统一求解与交付命名
+	- formal skeleton root 的声明：模型/动画导出在构建 Assimp scene 时先解析并传递 declared skeleton root name
+	- 动画/技能/报告共用同一份 resolution 元数据，而不是各自独立猜名
+- writer-side（仍保留在 glTF writer normalization 中）
+	- Assimp 写出的绝对 buffer URI 归一化为相对路径
+	- `JOINTS_0` accessor 从 float 重编码为 `UNSIGNED_SHORT`
+	- `skin.skeleton`、`inverseBindMatrices`、scene roots 与 mesh roots 的 writer 输出归一化
+	- 动画节点 `matrix -> TRS` 归一化与多 animation entry 合并为单 clip
+	- 基于 declared skeleton root 的 formal glTF 结构校验与失败即中止
+
+这意味着当前 formal pipeline 已经不再依赖“后处理猜 root”的旧模式。writer normalization 仍然存在，但它消费的是 exporter 预先声明的 formal root 和 formal contract，而不是重新定义 contract。
+
+### 当前正式命名规则
+
+为避免动画、技能和报告各自使用不同名称，当前 formal deliverable 命名固定为：
+
+- 模型：`Model/{character_id}.gltf` 与同名 `.bin`
+- 动画：`Animations/{deliverable_anim_file}.gltf` 与同名 `.bin`，其中 `deliverable_anim_file` 直接来自 shared formal animation resolution
+- 技能：`Skills/skill_config.json`
+- 纹理：`Textures/{texture_stem}.png`，其中 `texture_stem` 与材质清单中的 `exportedFile` 一致
+
+角色报告、技能配置中的动画元数据和目录中的实际文件名必须复用同一命名结果，不允许额外推断。
 
 ### 角色验收报告最小 schema
 

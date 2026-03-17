@@ -17,6 +17,19 @@ namespace DSAnimStudio.Export
     /// </summary>
     public class TextureExporter
     {
+        public sealed class TextureExportRecord
+        {
+            public string TextureName { get; init; }
+            public string SourceContainer { get; init; }
+            public string SourceFormat { get; init; }
+            public string DecodedPixelFormat { get; init; }
+            public string OutputFileName { get; init; }
+            public string FailureCode { get; init; }
+            public string FailureMessage { get; init; }
+
+            public bool Success => string.IsNullOrWhiteSpace(FailureCode);
+        }
+
         public enum ExportFormat
         {
             DDS,
@@ -51,7 +64,8 @@ namespace DSAnimStudio.Export
         /// Export all textures from a TPF archive.
         /// </summary>
         public void ExportTpf(TPF tpf, string outputDir,
-            Action<string, int, int> progressCallback = null)
+            Action<string, int, int> progressCallback = null,
+            Action<TextureExportRecord> recordCallback = null)
         {
             if (!Directory.Exists(outputDir))
                 Directory.CreateDirectory(outputDir);
@@ -78,20 +92,44 @@ namespace DSAnimStudio.Export
                     }
                     usedNames.Add(uniqueName);
 
+                    string sourceFormat = TryGetTpfTextureFormat(tex);
+                    string outputFileName;
+                    string decodedPixelFormat = string.Empty;
+
                     if (_options.Format == ExportFormat.DDS)
                     {
+                        outputFileName = $"{uniqueName}.dds";
                         ExportAsDds(tex.Bytes, uniqueName, outputDir);
                     }
                     else
                     {
-                        ExportAsPng(tex.Bytes, uniqueName, outputDir);
+                        outputFileName = $"{uniqueName}.png";
+                        decodedPixelFormat = ExportAsPng(tex.Bytes, uniqueName, outputDir);
                     }
+
+                    recordCallback?.Invoke(new TextureExportRecord
+                    {
+                        TextureName = baseName,
+                        SourceContainer = "DDS",
+                        SourceFormat = sourceFormat,
+                        DecodedPixelFormat = decodedPixelFormat,
+                        OutputFileName = outputFileName,
+                    });
                 }
                 catch (Exception ex)
                 {
                     string msg = $"Warning: Failed to export texture '{tex.Name}': {ex.Message}";
                     _warnings.Add(msg);
                     System.Diagnostics.Debug.WriteLine(msg);
+                    recordCallback?.Invoke(new TextureExportRecord
+                    {
+                        TextureName = tex.Name ?? $"texture_{i}",
+                        SourceContainer = "DDS",
+                        SourceFormat = TryGetTpfTextureFormat(tex),
+                        OutputFileName = string.Empty,
+                        FailureCode = "TEXTURE_EXPORT_FAILED",
+                        FailureMessage = ex.Message,
+                    });
 
                     if (!_options.SkipUnsupported)
                         throw new InvalidOperationException(msg, ex);
@@ -163,7 +201,7 @@ namespace DSAnimStudio.Export
         /// <summary>
         /// Decode DDS texture using Pfim and export as PNG.
         /// </summary>
-        private void ExportAsPng(byte[] ddsBytes, string name, string outputDir)
+        private string ExportAsPng(byte[] ddsBytes, string name, string outputDir)
         {
             using (var ms = new MemoryStream(ddsBytes))
             {
@@ -177,7 +215,7 @@ namespace DSAnimStudio.Export
                     string msg = $"Unsupported DDS format for '{name}': {ex.Message}";
                     _warnings.Add(msg);
                     if (_options.SkipUnsupported)
-                        return;
+                            return string.Empty;
                     throw;
                 }
 
@@ -208,14 +246,24 @@ namespace DSAnimStudio.Export
                     default:
                         _warnings.Add($"Unsupported pixel format '{image.Format}' for '{name}'.");
                         if (_options.SkipUnsupported)
-                            return;
+                            return image.Format.ToString();
                         throw new NotSupportedException($"Unsupported pixel format '{image.Format}' for '{name}'.");
                 }
 
                 using var bmp = CreateBitmap(image.Width, image.Height, pixelFormat, pixelData, image.Stride);
                 string outPath = Path.Combine(outputDir, $"{name}.png");
                 bmp.Save(outPath, System.Drawing.Imaging.ImageFormat.Png);
+                return image.Format.ToString();
             }
+        }
+
+        private static string TryGetTpfTextureFormat(TPF.Texture texture)
+        {
+            if (texture == null)
+                return string.Empty;
+
+            var formatProperty = texture.GetType().GetProperty("Format");
+            return formatProperty?.GetValue(texture)?.ToString() ?? string.Empty;
         }
 
         private static Bitmap CreateBitmap(int width, int height, PixelFormat pixelFormat, byte[] pixelData, int sourceStride)

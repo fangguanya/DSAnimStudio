@@ -76,6 +76,7 @@ namespace DSAnimStudio.Export
             var sceneBoneNames = new HashSet<string>(
                 boneNodes.Where(node => node != null).Select(node => node.Name),
                 StringComparer.Ordinal);
+            string formalSkeletonRootName = ResolveFormalSkeletonRootName(boneNodes, scene.RootNode);
 
             int meshIdx = 0;
             foreach (var flver in validFlvers)
@@ -94,17 +95,17 @@ namespace DSAnimStudio.Export
                         continue;
                     }
 
-                    assimpMesh.MaterialIndex = scene.Materials.IndexOf(material);
+                    assimpMesh.MaterialIndex = (int)scene.Materials.IndexOf(material);
                     if (assimpMesh.MaterialIndex < 0)
                     {
                         scene.Materials.Add(material);
-                        assimpMesh.MaterialIndex = scene.Materials.Count - 1;
+                        assimpMesh.MaterialIndex = (int)scene.Materials.Count - 1;
                     }
 
                     scene.Meshes.Add(assimpMesh);
 
                     var meshNode = new Node($"Mesh_{meshIdx}", scene.RootNode);
-                    meshNode.MeshIndices.Add(scene.Meshes.Count - 1);
+                    meshNode.MeshIndices.Add((int)scene.Meshes.Count - 1);
                     scene.RootNode.Children.Add(meshNode);
                     meshIdx++;
                 }
@@ -150,18 +151,37 @@ namespace DSAnimStudio.Export
                 if (!result)
                     throw new Exception("Formal model export failed for glTF 2.0.");
 
-                PostProcessGltf(exportedPath);
+                PostProcessGltf(exportedPath, formalSkeletonRootName);
             }
         }
 
         /// <summary>
-        /// Fix Assimp's glTF2 exporter quirks so UE5 Interchange can consume the file reliably.
-        /// - Rewrites absolute buffer URIs to relative filenames.
-        /// - Re-encodes JOINTS_0 accessors as UNSIGNED_SHORT instead of float.
+        /// Normalize writer-side glTF output so the formal contract can be validated deterministically.
         /// </summary>
-        private static void PostProcessGltf(string gltfPath)
+        private static void PostProcessGltf(string gltfPath, string formalSkeletonRootName)
         {
-            GltfPostProcessor.PostProcess(gltfPath);
+            GltfWriterPostProcessor.PostProcess(gltfPath, formalSkeletonRootName);
+        }
+
+        private static string ResolveFormalSkeletonRootName(IReadOnlyList<Node> boneNodes, Node sceneRoot)
+        {
+            if (boneNodes == null || boneNodes.Count == 0)
+                throw new InvalidOperationException("Formal model export produced no skeleton nodes.");
+
+            var rootCandidates = boneNodes
+                .Where(node => node != null && node.Parent == sceneRoot)
+                .ToList();
+
+            var selected = rootCandidates
+                .FirstOrDefault(node => !string.Equals(node.Name, "Armature", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(node.Name, "RootNode", StringComparison.OrdinalIgnoreCase))
+                ?? rootCandidates.FirstOrDefault()
+                ?? boneNodes.FirstOrDefault(node => node != null);
+
+            if (selected == null || string.IsNullOrWhiteSpace(selected.Name))
+                throw new InvalidOperationException("Formal model export could not resolve a declared skeleton root name.");
+
+            return selected.Name;
         }
 
         private static HashSet<int> CollectJointAccessorIndices(JObject root)

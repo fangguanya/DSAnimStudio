@@ -17,8 +17,8 @@ namespace SekiroExporter
 {
     /// <summary>
     /// CLI batch export tool for Sekiro game assets.
-    /// Exports models (DAE/FBX), animations (FBX), textures (PNG/DDS),
-    /// skill configs (JSON), and material manifests (JSON).
+    /// Exports formal model/animation glTF, formal texture PNG, skill config JSON,
+    /// and structured acceptance reports.
     ///
     /// Sekiro file structure per character:
     ///   chr/{chrId}.chrbnd.dcx  - Model (FLVER) + Skeleton (HKX)
@@ -73,6 +73,22 @@ namespace SekiroExporter
 
         private sealed class ExportCharacterReport
         {
+            private sealed class FailureEntry
+            {
+                public string Code { get; init; }
+                public string Message { get; init; }
+
+                public JObject ToJson()
+                {
+                    return new JObject
+                    {
+                        ["code"] = Code ?? string.Empty,
+                        ["message"] = Message ?? string.Empty,
+                    };
+                }
+            }
+
+            public string SchemaVersion { get; init; } = "2.1";
             public string CharacterId { get; init; }
             public bool ModelSucceeded { get; set; }
             public string ModelFileName { get; set; }
@@ -85,57 +101,121 @@ namespace SekiroExporter
             public bool ParamsSucceeded { get; set; }
             public bool HasCanonicalSkillConfig { get; set; }
             public string SkillConfigFileName { get; set; }
-            public List<string> ModelErrors { get; } = new List<string>();
-            public List<string> AnimationErrors { get; } = new List<string>();
-            public List<string> TextureErrors { get; } = new List<string>();
-            public List<string> SkillErrors { get; } = new List<string>();
-            public List<string> ParamErrors { get; } = new List<string>();
+            public string AnimationSourceAnibnd { get; set; }
+            public string SkillSourceAnibnd { get; set; }
+            public string FormalSkeletonRoot { get; set; }
+            public JToken AssemblyProfile { get; set; }
+            public List<FormalAnimationResolution> AnimationResolutions { get; } = new List<FormalAnimationResolution>();
+            public List<JObject> TextureEntries { get; } = new List<JObject>();
+            private List<FailureEntry> ModelErrors { get; } = new List<FailureEntry>();
+            private List<FailureEntry> AnimationErrors { get; } = new List<FailureEntry>();
+            private List<FailureEntry> TextureErrors { get; } = new List<FailureEntry>();
+            private List<FailureEntry> SkillErrors { get; } = new List<FailureEntry>();
+            private List<FailureEntry> ParamErrors { get; } = new List<FailureEntry>();
 
-            public void AddModelError(string message) => ModelErrors.Add(message);
-            public void AddAnimationError(string message) => AnimationErrors.Add(message);
-            public void AddTextureError(string message) => TextureErrors.Add(message);
-            public void AddSkillError(string message) => SkillErrors.Add(message);
-            public void AddParamError(string message) => ParamErrors.Add(message);
+            public int TextureErrorCount => TextureErrors.Count;
+            public int SkillErrorCount => SkillErrors.Count;
+            public int ParamErrorCount => ParamErrors.Count;
+
+            public void AddModelError(string code, string message) => ModelErrors.Add(new FailureEntry { Code = code, Message = message });
+            public void AddAnimationError(string code, string message) => AnimationErrors.Add(new FailureEntry { Code = code, Message = message });
+            public void AddTextureError(string code, string message) => TextureErrors.Add(new FailureEntry { Code = code, Message = message });
+            public void AddSkillError(string code, string message) => SkillErrors.Add(new FailureEntry { Code = code, Message = message });
+            public void AddParamError(string code, string message) => ParamErrors.Add(new FailureEntry { Code = code, Message = message });
 
             public bool IsSuccessfulFormalExport => ModelSucceeded && MaterialManifestSucceeded && AnimationsSucceeded && TexturesSucceeded && SkillsSucceeded && ParamsSucceeded && HasCanonicalSkillConfig;
+
+            private static JArray SerializeErrors(IEnumerable<FailureEntry> errors)
+            {
+                return new JArray(errors.Select(error => error.ToJson()));
+            }
 
             public JObject ToJson()
             {
                 return new JObject
                 {
+                    ["schemaVersion"] = SchemaVersion,
                     ["characterId"] = CharacterId,
+                    ["sources"] = new JObject
+                    {
+                        ["animationSourceAnibnd"] = AnimationSourceAnibnd ?? string.Empty,
+                        ["skillSourceAnibnd"] = SkillSourceAnibnd ?? string.Empty,
+                    },
+                    ["assemblyProfile"] = AssemblyProfile ?? JValue.CreateNull(),
+                    ["animationResolutions"] = new JArray(AnimationResolutions.Select(resolution => resolution.ToJson())),
                     ["model"] = new JObject
                     {
                         ["success"] = ModelSucceeded,
                         ["fileName"] = ModelFileName ?? string.Empty,
+                        ["formalSkeletonRoot"] = FormalSkeletonRoot ?? string.Empty,
                         ["materialManifest"] = MaterialManifestSucceeded,
-                        ["errors"] = new JArray(ModelErrors),
+                        ["errors"] = SerializeErrors(ModelErrors),
                     },
                     ["animations"] = new JObject
                     {
                         ["success"] = AnimationsSucceeded,
                         ["count"] = AnimationCount,
-                        ["errors"] = new JArray(AnimationErrors),
+                        ["errors"] = SerializeErrors(AnimationErrors),
                     },
                     ["textures"] = new JObject
                     {
                         ["success"] = TexturesSucceeded,
                         ["count"] = TextureCount,
-                        ["errors"] = new JArray(TextureErrors),
+                        ["entries"] = new JArray(TextureEntries),
+                        ["errors"] = SerializeErrors(TextureErrors),
                     },
                     ["skills"] = new JObject
                     {
                         ["success"] = SkillsSucceeded,
                         ["canonicalSkillConfig"] = HasCanonicalSkillConfig,
                         ["fileName"] = SkillConfigFileName ?? string.Empty,
-                        ["errors"] = new JArray(SkillErrors),
+                        ["errors"] = SerializeErrors(SkillErrors),
                     },
                     ["params"] = new JObject
                     {
                         ["success"] = ParamsSucceeded,
-                        ["errors"] = new JArray(ParamErrors),
+                        ["errors"] = SerializeErrors(ParamErrors),
                     },
                     ["formalSuccess"] = IsSuccessfulFormalExport,
+                };
+            }
+        }
+
+        private sealed class FormalAssemblyProfile
+        {
+            public string Id { get; init; }
+            public string Description { get; init; }
+            public bool IsFemale { get; init; }
+            public NewChrAsmCfgJson Config { get; init; }
+            public IReadOnlyList<string> BinderPaths { get; init; }
+
+            public JObject ToJson()
+            {
+                var equipIds = new JObject();
+                foreach (var kvp in Config?.EquipIDs ?? new Dictionary<NewChrAsm.EquipSlotTypes, int>())
+                    equipIds[kvp.Key.ToString()] = kvp.Value;
+
+                var directEquip = new JObject();
+                foreach (var kvp in Config?.DirectEquipInfos ?? new Dictionary<NewChrAsm.EquipSlotTypes, NewEquipSlot_Armor.DirectEquipInfo>())
+                {
+                    directEquip[kvp.Key.ToString()] = new JObject
+                    {
+                        ["partPrefix"] = kvp.Value.PartPrefix.ToString(),
+                        ["gender"] = kvp.Value.Gender.ToString(),
+                        ["modelId"] = kvp.Value.ModelID,
+                    };
+                }
+
+                return new JObject
+                {
+                    ["id"] = Id ?? string.Empty,
+                    ["description"] = Description ?? string.Empty,
+                    ["isFemale"] = IsFemale,
+                    ["weaponStyle"] = Config?.WeaponStyle.ToString() ?? string.Empty,
+                    ["partSuffixType"] = Config?.CurrentPartSuffixType.ToString() ?? string.Empty,
+                    ["equipIds"] = equipIds,
+                    ["directEquip"] = directEquip,
+                    ["binderPaths"] = new JArray((BinderPaths ?? Array.Empty<string>()).Select(Path.GetFileName)),
                 };
             }
         }
@@ -240,6 +320,9 @@ namespace SekiroExporter
             if (string.Equals(command, "convert-to-fbx", StringComparison.OrdinalIgnoreCase))
                 return;
 
+            if (args.ContainsKey("keep-intermediates"))
+                throw new ArgumentException("Formal export does not permit '--keep-intermediates'. Debug/compat outputs must stay outside the formal pipeline.");
+
             string requestedTextureFormat = (args.GetValueOrDefault("format") ?? "png").Trim().ToLowerInvariant();
             if (requestedTextureFormat != "png")
                 throw new ArgumentException("Formal export only supports '--format png'. DDS is not a formal deliverable.");
@@ -296,6 +379,7 @@ namespace SekiroExporter
             File.WriteAllText(summaryPath, summaryJson.ToString(Newtonsoft.Json.Formatting.Indented));
 
             Console.WriteLine($"═══════════════════════════════════════════");
+                Directory.CreateDirectory(output);
             Console.WriteLine($"Export complete: {reports.Count(report => report.IsSuccessfulFormalExport)} formal successes, {reports.Count(report => !report.IsSuccessfulFormalExport)} formal failures, {errors} exceptions in {sw.Elapsed.TotalSeconds:F1}s");
             Console.WriteLine($"Summary: {summaryPath}");
             return (errors > 0 || reports.Any(report => !report.IsSuccessfulFormalExport)) ? 1 : 0;
@@ -338,9 +422,8 @@ namespace SekiroExporter
                     catch (Exception ex) { Console.Error.WriteLine($"  FLVER parse error: {ex.Message}"); }
                 }
                 else if ((sections.HasFlag(ExportSections.Model) || sections.HasFlag(ExportSections.Animations))
-                    && name.EndsWith(".hkx") && !name.Contains("_c.hkx") && !name.EndsWith(".hkxpwv"))
+                    && IsFormalSkeletonHkxEntry(file.Name, chrId))
                 {
-                    // Sekiro skeleton HKX: named "{chrId}.HKX" (NOT "{chrId}_c.hkx" which is collision)
                     byte[] d = file.Bytes;
                     if (DCX.Is(d)) d = DCX.Decompress(d);
                     skeletonHkx = TryReadHkx(d, file.Name);
@@ -355,8 +438,10 @@ namespace SekiroExporter
             }
 
             Console.WriteLine($"  CHRBND: FLVER={flver != null} (nodes={flver?.Nodes?.Count}, meshes={flver?.Meshes?.Count}), Skeleton={skeletonHkx != null}, TPFs={tpfDataList.Count}");
+            var formalAssemblyProfile = ResolveFormalAssemblyProfile(gameDir, chrId, args);
+            report.AssemblyProfile = formalAssemblyProfile.ToJson();
             var modelBinderPaths = (sections.HasFlag(ExportSections.Model) || sections.HasFlag(ExportSections.Animations) || sections.HasFlag(ExportSections.Textures))
-                ? ResolveFormalModelBinderPaths(gameDir, chrId, args)
+                ? formalAssemblyProfile.BinderPaths.ToList()
                 : new List<string>();
             if (modelBinderPaths.Count > 0)
             {
@@ -380,6 +465,7 @@ namespace SekiroExporter
                 }
                 catch (Exception ex)
                 {
+                    report.AddModelError("ASSEMBLY_PROFILE_BINDER_LOAD_FAILED", ex.Message);
                     Console.Error.WriteLine($"  MODEL ASSEMBLY error: {ex.Message}");
                 }
             }
@@ -387,30 +473,36 @@ namespace SekiroExporter
             // ═══════════════════════════════════════════
             // 2. Load TEXBND → textures (separate file)
             // ═══════════════════════════════════════════
-            string texbndPath = Path.Combine(chrDir, $"{chrId}.texbnd.dcx");
-            if (sections.HasFlag(ExportSections.Textures) && File.Exists(texbndPath))
+            var formalTextureBinderPaths = sections.HasFlag(ExportSections.Textures)
+                ? ResolveFormalTextureBinderPaths(chrDir, chrId)
+                : new List<string>();
+            if (sections.HasFlag(ExportSections.Textures) && formalTextureBinderPaths.Count > 0)
             {
-                try
+                foreach (string texbndPath in formalTextureBinderPaths)
                 {
-                    byte[] texbndData = File.ReadAllBytes(texbndPath);
-                    if (DCX.Is(texbndData)) texbndData = DCX.Decompress(texbndData);
-                    var texBnd = BND4.Read(texbndData);
-
-                    foreach (var file in texBnd.Files)
+                    try
                     {
-                        string name = file.Name?.ToLower() ?? "";
-                        if (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx"))
+                        byte[] texbndData = File.ReadAllBytes(texbndPath);
+                        if (DCX.Is(texbndData)) texbndData = DCX.Decompress(texbndData);
+                        var texBnd = BND4.Read(texbndData);
+
+                        foreach (var file in texBnd.Files)
                         {
-                            byte[] d = file.Bytes;
-                            if (DCX.Is(d)) d = DCX.Decompress(d);
-                            tpfDataList.Add(d);
+                            string name = file.Name?.ToLower() ?? "";
+                            if (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx"))
+                            {
+                                byte[] d = file.Bytes;
+                                if (DCX.Is(d)) d = DCX.Decompress(d);
+                                tpfDataList.Add(d);
+                            }
                         }
+
+                        Console.WriteLine($"  TEXBND: {Path.GetFileName(texbndPath)} -> {texBnd.Files.Count} files, {tpfDataList.Count} total TPFs");
                     }
-                    Console.WriteLine($"  TEXBND: found {texBnd.Files.Count} files, extracted {tpfDataList.Count} total TPFs");
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"  TEXBND error: {ex.Message}");
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  TEXBND error ({Path.GetFileName(texbndPath)}): {ex.Message}");
+                    }
                 }
             }
 
@@ -429,6 +521,7 @@ namespace SekiroExporter
                 Path.GetFullPath(skillAnibndPath),
                 StringComparison.OrdinalIgnoreCase);
             byte[] anibndRawBytes = null;
+            report.SkillSourceAnibnd = Path.GetFileName(skillAnibndPath);
 
             if ((sections.HasFlag(ExportSections.Animations) || sections.HasFlag(ExportSections.Skills))
                 && File.Exists(anibndPath))
@@ -437,6 +530,7 @@ namespace SekiroExporter
                 {
                     var animationSource = LoadAnibndSource(anibndPath, includeRawBytes: true, includeTae: sections.HasFlag(ExportSections.Skills) && !hasDistinctSkillSource);
                     anibndRawBytes = animationSource.RawBytes;
+                    report.AnimationSourceAnibnd = Path.GetFileName(anibndPath);
                     if (!hasDistinctSkillSource)
                         tae = animationSource.Tae;
 
@@ -444,6 +538,7 @@ namespace SekiroExporter
                 }
                 catch (Exception ex)
                 {
+                    report.AddAnimationError("ANIMATION_SOURCE_LOAD_FAILED", ex.Message);
                     Console.Error.WriteLine($"  ANIBND error: {ex.Message}");
                 }
             }
@@ -451,14 +546,15 @@ namespace SekiroExporter
             if (sections.HasFlag(ExportSections.Skills) && hasDistinctSkillSource)
             {
                 Console.WriteLine($"  SKILL SOURCE: {Path.GetFileName(skillAnibndPath)}");
+                report.SkillSourceAnibnd = Path.GetFileName(skillAnibndPath);
 
                 if (string.IsNullOrWhiteSpace(animationFilter))
                 {
-                    report.AddSkillError("Formal skill export with an independent '--skill-anibnd' requires '--anim <id>' so the TAE payload can be filtered to delivered clips.");
+                    report.AddSkillError("SKILL_SOURCE_REQUIRES_ANIM_FILTER", "Formal skill export with an independent '--skill-anibnd' requires '--anim <id>' so the TAE payload can be filtered to delivered clips.");
                 }
                 else if (!File.Exists(skillAnibndPath))
                 {
-                    report.AddSkillError($"Formal skill ANIBND was not found: {skillAnibndPath}");
+                    report.AddSkillError("SKILL_SOURCE_NOT_FOUND", $"Formal skill ANIBND was not found: {skillAnibndPath}");
                 }
                 else
                 {
@@ -470,23 +566,36 @@ namespace SekiroExporter
                     }
                     catch (Exception ex)
                     {
-                        report.AddSkillError(ex.Message);
+                        report.AddSkillError("SKILL_SOURCE_LOAD_FAILED", ex.Message);
                         Console.Error.WriteLine($"  ✗ Skill source error: {ex.Message}");
                     }
                 }
             }
             else if (sections.HasFlag(ExportSections.Skills) && !string.IsNullOrWhiteSpace(animationFilter))
             {
+                report.SkillSourceAnibnd = Path.GetFileName(skillAnibndPath);
                 try
                 {
                     tae = FilterTaeForFormalSkillExport(tae, animationFilter, anibndPath);
                 }
                 catch (Exception ex)
                 {
-                    report.AddSkillError(ex.Message);
+                    report.AddSkillError("SKILL_FILTER_FAILED", ex.Message);
                     Console.Error.WriteLine($"  ✗ Skill filter error: {ex.Message}");
                 }
             }
+
+            var animationSourceInfo = File.Exists(anibndPath)
+                ? LoadAnibndSource(anibndPath, includeRawBytes: false, includeTae: false)
+                : null;
+            var formalAnimationResolutions = BuildFormalAnimationResolutions(
+                tae,
+                animationFilter,
+                animationSourceInfo,
+                anibndPath,
+                skillAnibndPath,
+                report);
+            report.AnimationResolutions.AddRange(formalAnimationResolutions);
 
             // ═══════════════════════════════════════════
             // 4. Export model (glTF 2.0)
@@ -512,18 +621,19 @@ namespace SekiroExporter
                     {
                         report.ModelSucceeded = true;
                         report.ModelFileName = Path.GetFileName(actualModelFile);
+                        report.FormalSkeletonRoot = ExtractFormalSkeletonRoot(actualModelFile);
                         Console.WriteLine($"  ✓ Model: {Path.GetFileName(actualModelFile)} ({new FileInfo(actualModelFile).Length / 1024}KB)");
                     }
                     else
                     {
                         string message = "No formal model deliverable produced (.gltf).";
-                        report.AddModelError(message);
+                        report.AddModelError("MODEL_DELIVERABLE_MISSING", message);
                         Console.Error.WriteLine($"  ✗ Model: {message}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    report.AddModelError(ex.Message);
+                    report.AddModelError("MODEL_EXPORT_FAILED", ex.Message);
                     Console.Error.WriteLine($"  ✗ Model export error: {ex.Message}");
                 }
 
@@ -538,7 +648,7 @@ namespace SekiroExporter
                 }
                 catch (Exception ex)
                 {
-                    report.AddModelError($"Material manifest: {ex.Message}");
+                    report.AddModelError("MATERIAL_MANIFEST_EXPORT_FAILED", ex.Message);
                     Console.Error.WriteLine($"  ✗ Material manifest error: {ex.Message}");
                 }
             }
@@ -565,12 +675,25 @@ namespace SekiroExporter
                     try
                     {
                         var tpf = TPF.Read(tpfData);
-                        texExporter.ExportTpf(tpf, texDir);
+                        texExporter.ExportTpf(tpf, texDir, recordCallback: record =>
+                        {
+                            report.TextureEntries.Add(new JObject
+                            {
+                                ["textureName"] = record.TextureName ?? string.Empty,
+                                ["sourceContainer"] = record.SourceContainer ?? string.Empty,
+                                ["sourceFormat"] = record.SourceFormat ?? string.Empty,
+                                ["decodedPixelFormat"] = record.DecodedPixelFormat ?? string.Empty,
+                                ["outputFileName"] = record.OutputFileName ?? string.Empty,
+                                ["success"] = record.Success,
+                                ["failureCode"] = record.FailureCode ?? string.Empty,
+                                ["failureMessage"] = record.FailureMessage ?? string.Empty,
+                            });
+                        });
                         exportedTpfCount++;
                     }
                     catch (Exception ex)
                     {
-                        report.AddTextureError(ex.Message);
+                        report.AddTextureError("TEXTURE_EXPORT_FAILED", ex.Message);
                         Console.Error.WriteLine($"  ✗ TPF export error: {ex.Message}");
                         break;
                     }
@@ -578,13 +701,13 @@ namespace SekiroExporter
 
                 int texCount = Directory.GetFiles(texDir, "*.png").Length;
                 report.TextureCount = texCount;
-                report.TexturesSucceeded = exportedTpfCount == tpfDataList.Count && texCount > 0 && report.TextureErrors.Count == 0;
+                report.TexturesSucceeded = exportedTpfCount == tpfDataList.Count && texCount > 0 && report.TextureErrorCount == 0;
                 if (report.TexturesSucceeded)
                     Console.WriteLine($"  ✓ Textures: {texCount} PNG files exported");
             }
             else if (sections.HasFlag(ExportSections.Textures))
             {
-                report.AddTextureError("No formal texture sources were found for this character.");
+                report.AddTextureError("TEXTURE_SOURCE_MISSING", "No formal texture sources were found for this character.");
             }
 
             // ═══════════════════════════════════════════
@@ -600,7 +723,8 @@ namespace SekiroExporter
 
                 try
                 {
-                    animExporter.ExportAnibnd(anibndRawBytes, skeletonHkx, animDir, modelFlvers, animationFilter,
+                    string animationExportFilter = ResolveAnimationExportFilter(animationFilter, formalAnimationResolutions);
+                    animExporter.ExportAnibnd(anibndRawBytes, skeletonHkx, animDir, modelFlvers, animationExportFilter,
                         (name, cur, total) =>
                         {
                             if (cur % 20 == 0 || cur == total)
@@ -615,13 +739,13 @@ namespace SekiroExporter
                 }
                 catch (Exception ex)
                 {
-                    report.AddAnimationError(ex.Message);
+                    report.AddAnimationError("ANIMATION_EXPORT_FAILED", ex.Message);
                     Console.Error.WriteLine($"  ✗ Animation export error: {ex.Message}");
                 }
             }
             else if (skeletonHkx == null && File.Exists(anibndPath))
             {
-                report.AddAnimationError("Skeleton HKX could not be parsed via the formal Sekiro parser.");
+                report.AddAnimationError("SKELETON_PARSE_FAILED", "Skeleton HKX could not be parsed via the formal Sekiro parser.");
                 Console.WriteLine($"  - Animations: skipped (skeleton not parsed)");
             }
 
@@ -653,11 +777,11 @@ namespace SekiroExporter
                         ModelFlvers = modelFlvers,
                         Params = exportedParams,
                         Prosthetics = prosthetics,
-                        ResolveAnimationFileName = animName => ResolveAnimationDeliverableFileName(animDir, animName),
+                        ResolveAnimation = anim => ResolveFormalAnimationForSkill(formalAnimationResolutions, anim),
                     });
                     report.ParamsSucceeded = exportedParams.Properties().Count() >= 4;
                     if (!report.ParamsSucceeded)
-                        report.AddParamError("Canonical param payload is incomplete.");
+                        report.AddParamError("CANONICAL_PARAMS_INCOMPLETE", "Canonical param payload is incomplete.");
                     report.SkillsSucceeded = true;
                     report.HasCanonicalSkillConfig = true;
                     report.SkillConfigFileName = Path.GetFileName(skillConfigPath);
@@ -665,17 +789,17 @@ namespace SekiroExporter
                 }
                 catch (Exception ex)
                 {
-                    report.AddSkillError(ex.Message);
+                    report.AddSkillError("SKILL_EXPORT_FAILED", ex.Message);
                     Console.Error.WriteLine($"  ✗ Skill config error: {ex.Message}");
                 }
             }
-            else if (sections.HasFlag(ExportSections.Skills) && report.SkillErrors.Count == 0)
+            else if (sections.HasFlag(ExportSections.Skills) && report.SkillErrorCount == 0)
             {
-                report.AddSkillError("No TAE data was found in the selected ANIBND for formal skill export.");
+                report.AddSkillError("SKILL_TAE_MISSING", "No TAE data was found in the selected ANIBND for formal skill export.");
             }
 
-            if (sections.HasFlag(ExportSections.Skills) && !report.ParamsSucceeded && report.ParamErrors.Count == 0)
-                report.AddParamError("Canonical skill parameters were not exported because formal skill export did not complete.");
+            if (sections.HasFlag(ExportSections.Skills) && !report.ParamsSucceeded && report.ParamErrorCount == 0)
+                report.AddParamError("PARAM_EXPORT_SKIPPED", "Canonical skill parameters were not exported because formal skill export did not complete.");
 
             string reportPath = Path.Combine(outputDir, "export_report.json");
             File.WriteAllText(reportPath, report.ToJson().ToString(Newtonsoft.Json.Formatting.Indented));
@@ -705,6 +829,53 @@ namespace SekiroExporter
 
             Console.Error.WriteLine($"  HKX: formal Sekiro tagfile parsing failed for {fileName} ({data.Length} bytes)");
             return null;
+        }
+
+        static bool IsFormalSkeletonHkxEntry(string fileName, string chrId)
+        {
+            if (string.IsNullOrWhiteSpace(fileName) || string.IsNullOrWhiteSpace(chrId))
+                return false;
+
+            string normalizedName = Path.GetFileName(fileName).ToLowerInvariant();
+            if (!normalizedName.EndsWith(".hkx") && !normalizedName.EndsWith(".hkx.dcx"))
+                return false;
+
+            if (normalizedName.EndsWith(".hkxpwv") || normalizedName.EndsWith(".hkxpwv.dcx"))
+                return false;
+
+            string stem = Path.GetFileNameWithoutExtension(normalizedName);
+            if (stem.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase))
+                stem = Path.GetFileNameWithoutExtension(stem);
+
+            return string.Equals(stem, chrId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        static List<string> ResolveFormalTextureBinderPaths(string chrDir, string chrId)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(chrDir) || string.IsNullOrWhiteSpace(chrId))
+                return result;
+
+            void addIfExists(string path)
+            {
+                if (!string.IsNullOrWhiteSpace(path)
+                    && File.Exists(path)
+                    && !result.Contains(path, StringComparer.OrdinalIgnoreCase))
+                {
+                    result.Add(path);
+                }
+            }
+
+            addIfExists(Path.Combine(chrDir, $"{chrId}.texbnd.dcx"));
+
+            if (chrId.Length >= 4)
+            {
+                string sharedTextureChrId = $"{chrId.Substring(0, 4)}9";
+                if (!string.Equals(sharedTextureChrId, chrId, StringComparison.OrdinalIgnoreCase))
+                    addIfExists(Path.Combine(chrDir, $"{sharedTextureChrId}.texbnd.dcx"));
+            }
+
+            return result;
         }
 
         static int RunExportModel(Dictionary<string, string> args)
@@ -855,20 +1026,46 @@ namespace SekiroExporter
                 .Where(path => path.Length > 0);
         }
 
-        static List<string> ResolveFormalModelBinderPaths(string gameDir, string chrId, Dictionary<string, string> args)
+        static FormalAssemblyProfile ResolveFormalAssemblyProfile(string gameDir, string chrId, Dictionary<string, string> args)
         {
             string overrideModelBinder = args.GetValueOrDefault("model-binder");
             if (!string.IsNullOrWhiteSpace(overrideModelBinder))
             {
-                return SplitOverridePaths(overrideModelBinder)
+                var overridePaths = SplitOverridePaths(overrideModelBinder)
                     .Select(path => ResolveGamePath(gameDir, path))
                     .ToList();
+
+                return new FormalAssemblyProfile
+                {
+                    Id = $"{chrId}-override-binders-v1",
+                    Description = "Explicit CLI override binders",
+                    IsFemale = false,
+                    Config = new NewChrAsmCfgJson { GameType = SoulsGames.SDT },
+                    BinderPaths = overridePaths,
+                };
             }
 
             if (chrId.Equals("c0000", StringComparison.OrdinalIgnoreCase))
-                return ResolveFormalSekiroPlayerModelBinderPaths(gameDir, GetFormalSekiroExportAssemblyConfig(chrId), isFemale: false).ToList();
+            {
+                var config = GetFormalSekiroExportAssemblyConfig(chrId);
+                return new FormalAssemblyProfile
+                {
+                    Id = "sekiro-player-canonical-v1",
+                    Description = "Canonical multipart Sekiro player assembly for formal export",
+                    IsFemale = false,
+                    Config = config,
+                    BinderPaths = ResolveFormalSekiroPlayerModelBinderPaths(gameDir, config, isFemale: false).ToList(),
+                };
+            }
 
-            return new List<string>();
+            return new FormalAssemblyProfile
+            {
+                Id = $"{chrId}-single-chrbnd-v1",
+                Description = "Single CHRBND model without multipart override",
+                IsFemale = false,
+                Config = new NewChrAsmCfgJson { GameType = SoulsGames.SDT },
+                BinderPaths = Array.Empty<string>(),
+            };
         }
 
         static NewChrAsmCfgJson GetFormalSekiroExportAssemblyConfig(string chrId)
@@ -1134,7 +1331,12 @@ namespace SekiroExporter
             public TAE Tae { get; init; }
             public int HkxCount { get; init; }
             public bool HasCompendium { get; init; }
+            public IReadOnlySet<string> AnimationFileStems { get; init; }
+            public IReadOnlyDictionary<long, string> AnimationStemById { get; init; }
         }
+
+        private const int FormalLongAnimIdMod = 1_000000;
+        private const int FormalAnimationBindIdMod = 1_000_000_000;
 
         static string ResolveSkillSourceAnibndPath(string gameDir, string chrDir, string chrId, Dictionary<string, string> args)
         {
@@ -1155,21 +1357,41 @@ namespace SekiroExporter
             TAE tae = null;
             int hkxCount = 0;
             bool hasCompendium = false;
+            var animationFileStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var animationStemById = new Dictionary<long, string>();
+            bool isPlayerAnibnd = IsFormalPlayerAnibnd(anibndPath);
+            int taeRootBindId = ResolveFormalTaeRootBindId(aniBnd);
+            int taeBindIdMax = taeRootBindId + 99999;
 
             foreach (var file in aniBnd.Files)
             {
                 string name = file.Name?.ToLowerInvariant() ?? string.Empty;
 
-                if (includeTae && (name.EndsWith(".tae") || name.EndsWith(".tae.dcx")))
+                if (includeTae && IsFormalTaeBinderEntry(file, isPlayerAnibnd, taeRootBindId, taeBindIdMax))
                 {
                     byte[] taeBytes = file.Bytes;
                     if (DCX.Is(taeBytes))
                         taeBytes = DCX.Decompress(taeBytes);
-                    tae = MergeFormalTaeSources(tae, TAE.Read(taeBytes));
+                    var taeFile = TAE.Read(taeBytes);
+                    if (isPlayerAnibnd)
+                    {
+                        int taeBindIndex = file.ID % taeRootBindId;
+                        NormalizePlayerTaeAnimationIds(taeFile, taeBindIndex);
+                    }
+
+                    tae = MergeFormalTaeSources(tae, taeFile);
                 }
                 else if (name.EndsWith(".hkx") || name.EndsWith(".hkx.dcx"))
                 {
                     hkxCount++;
+                    string stem = NormalizeAnimationReference(file.Name ?? string.Empty);
+                    if (!string.IsNullOrWhiteSpace(stem))
+                    {
+                        animationFileStems.Add(stem);
+                        long fullAnimationId = file.ID % FormalAnimationBindIdMod;
+                        if (fullAnimationId >= 0)
+                            animationStemById[fullAnimationId] = stem;
+                    }
                 }
 
                 if (file.ID == 7000000)
@@ -1182,7 +1404,280 @@ namespace SekiroExporter
                 Tae = tae,
                 HkxCount = hkxCount,
                 HasCompendium = hasCompendium,
+                AnimationFileStems = animationFileStems,
+                AnimationStemById = animationStemById,
             };
+        }
+
+        static bool IsFormalPlayerAnibnd(string anibndPath)
+        {
+            if (string.IsNullOrWhiteSpace(anibndPath))
+                return false;
+
+            string fileName = Path.GetFileName(anibndPath) ?? string.Empty;
+            string stem = Path.GetFileNameWithoutExtension(fileName);
+            if (stem.EndsWith(".anibnd", StringComparison.OrdinalIgnoreCase))
+                stem = Path.GetFileNameWithoutExtension(stem);
+
+            return string.Equals(stem, "c0000", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(stem, "c0000_0000", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static int ResolveFormalTaeRootBindId(IBinder anibnd)
+        {
+            bool ver0001 = anibnd.Files.Any(file => file.ID == 9999999);
+            return ver0001 ? 5000000 : 3000000;
+        }
+
+        static bool IsFormalTaeBinderEntry(BinderFile file, bool isPlayerAnibnd, int taeRootBindId, int taeBindIdMax)
+        {
+            if (file == null)
+                return false;
+
+            string name = file.Name?.ToLowerInvariant() ?? string.Empty;
+            bool hasTaeExtension = name.EndsWith(".tae") || name.EndsWith(".tae.dcx");
+            if (!hasTaeExtension)
+                return false;
+
+            if (!isPlayerAnibnd)
+                return true;
+
+            return file.ID >= taeRootBindId && file.ID <= taeBindIdMax;
+        }
+
+        static void NormalizePlayerTaeAnimationIds(TAE tae, int taeBindIndex)
+        {
+            if (tae?.Animations == null || tae.Animations.Count == 0)
+                return;
+
+            int upperId = taeBindIndex * FormalLongAnimIdMod;
+            foreach (var animation in tae.Animations)
+            {
+                if (animation == null)
+                    continue;
+
+                animation.ID = upperId + (int)(animation.ID % FormalLongAnimIdMod);
+            }
+        }
+
+        static List<FormalAnimationResolution> BuildFormalAnimationResolutions(
+            TAE tae,
+            string animationFilter,
+            AnibndSourceInfo animationSource,
+            string animationSourcePath,
+            string skillSourcePath,
+            ExportCharacterReport report)
+        {
+            var results = new List<FormalAnimationResolution>();
+
+            if (tae?.Animations != null && tae.Animations.Count > 0)
+            {
+                var animationIndex = BuildFormalAnimationIndex(tae.Animations, "formal animation resolution");
+                foreach (var animation in tae.Animations)
+                {
+                    try
+                    {
+                        results.Add(ResolveFormalAnimation(animation, animationIndex, animationSource, animationSourcePath, skillSourcePath));
+                    }
+                    catch (Exception ex)
+                    {
+                        report.AddAnimationError("ANIMATION_RESOLUTION_FAILED", ex.Message);
+                    }
+                }
+
+                return results;
+            }
+
+            if (!string.IsNullOrWhiteSpace(animationFilter))
+            {
+                string normalizedFilter = NormalizeAnimationReference(animationFilter);
+                long parsedId = ParseAnimationKeyToId(normalizedFilter);
+                results.Add(new FormalAnimationResolution
+                {
+                    RequestTaeId = parsedId,
+                    RequestTaeName = normalizedFilter,
+                    ResolvedTaeId = parsedId,
+                    ResolvedTaeName = normalizedFilter,
+                    ResolvedHkxId = parsedId,
+                    ResolvedHkxName = normalizedFilter,
+                    SourceAnimFileName = normalizedFilter,
+                    SourceAnimStem = normalizedFilter,
+                    DeliverableAnimFileName = $"{normalizedFilter}.gltf",
+                    AnimationSourceAnibnd = Path.GetFileName(animationSourcePath),
+                    SkillSourceAnibnd = Path.GetFileName(skillSourcePath),
+                });
+            }
+
+            return results;
+        }
+
+        static IReadOnlyDictionary<long, TAE.Animation> BuildFormalAnimationIndex(
+            IEnumerable<TAE.Animation> animations,
+            string context)
+        {
+            var result = new Dictionary<long, TAE.Animation>();
+            foreach (var group in (animations ?? Enumerable.Empty<TAE.Animation>()).GroupBy(animation => animation.ID))
+            {
+                var candidates = group.Where(animation => animation != null).ToList();
+                if (candidates.Count == 0)
+                    continue;
+
+                var distinctSignatures = candidates
+                    .Select(BuildFormalAnimationSignature)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+                if (distinctSignatures.Count > 1)
+                    throw new InvalidOperationException($"Duplicate TAE animation ID '{FormatAnimationKey(group.Key)}' has multiple distinct payloads in {context}.");
+
+                result[group.Key] = candidates[0];
+            }
+
+            return result;
+        }
+
+        static string BuildFormalAnimationSignature(TAE.Animation animation)
+        {
+            if (animation == null)
+                return string.Empty;
+
+            string sourceFile = NormalizeAnimationReference(GetSourceAnimationFileName(animation));
+            string headerKind = animation.Header?.GetType().FullName ?? string.Empty;
+            string actionSignature = string.Join("|", (animation.Actions ?? new List<TAE.Action>()).Select(action =>
+                $"{action.Type}:{action.StartTime:F4}:{action.EndTime:F4}:{action.ParameterBytes?.Length ?? 0}"));
+
+            return $"{FormatAnimationKey(animation.ID)}::{headerKind}::{sourceFile}::{actionSignature}";
+        }
+
+        static FormalAnimationResolution ResolveFormalAnimation(
+            TAE.Animation requestAnimation,
+            IReadOnlyDictionary<long, TAE.Animation> animationIndex,
+            AnibndSourceInfo animationSource,
+            string animationSourcePath,
+            string skillSourcePath)
+        {
+            var visitedIds = new HashSet<long>();
+            var resolvedAnimation = ResolveTaeReferenceChain(requestAnimation, animationIndex, visitedIds);
+            long resolvedHkxId = ResolveHkxId(resolvedAnimation);
+            string resolvedHkxName = FormatAnimationKey(resolvedHkxId);
+            string sourceAnimFileName = GetSourceAnimationFileName(resolvedAnimation);
+            string sourceAnimStem = NormalizeAnimationReference(sourceAnimFileName);
+            string exportAnimStem = sourceAnimStem;
+            if (animationSource?.AnimationStemById != null
+                && animationSource.AnimationStemById.TryGetValue(resolvedHkxId, out string mappedAnimStem)
+                && !string.IsNullOrWhiteSpace(mappedAnimStem))
+            {
+                exportAnimStem = mappedAnimStem;
+            }
+
+            if (string.IsNullOrWhiteSpace(sourceAnimStem))
+                sourceAnimStem = resolvedHkxName;
+            if (string.IsNullOrWhiteSpace(exportAnimStem))
+                exportAnimStem = sourceAnimStem;
+            if (string.IsNullOrWhiteSpace(exportAnimStem))
+                exportAnimStem = resolvedHkxName;
+
+            if (animationSource?.AnimationFileStems != null && animationSource.AnimationFileStems.Count > 0
+                && !animationSource.AnimationFileStems.Contains(exportAnimStem))
+            {
+                throw new InvalidOperationException($"Formal animation resolution for '{FormatAnimationKey(requestAnimation.ID)}' resolved to '{exportAnimStem}', but animation source '{Path.GetFileName(animationSourcePath)}' does not contain that HKX file.");
+            }
+
+            return new FormalAnimationResolution
+            {
+                RequestTaeId = requestAnimation.ID,
+                RequestTaeName = FormatAnimationKey(requestAnimation.ID),
+                ResolvedTaeId = resolvedAnimation.ID,
+                ResolvedTaeName = FormatAnimationKey(resolvedAnimation.ID),
+                ResolvedHkxId = resolvedHkxId,
+                ResolvedHkxName = resolvedHkxName,
+                SourceAnimFileName = sourceAnimFileName,
+                SourceAnimStem = exportAnimStem,
+                DeliverableAnimFileName = $"{exportAnimStem}.gltf",
+                AnimationSourceAnibnd = Path.GetFileName(animationSourcePath),
+                SkillSourceAnibnd = Path.GetFileName(skillSourcePath),
+            };
+        }
+
+        static TAE.Animation ResolveTaeReferenceChain(
+            TAE.Animation animation,
+            IReadOnlyDictionary<long, TAE.Animation> animationIndex,
+            HashSet<long> visitedIds)
+        {
+            if (animation == null)
+                throw new InvalidOperationException("Formal animation resolution received a null TAE animation.");
+
+            if (!visitedIds.Add(animation.ID))
+                throw new InvalidOperationException($"Formal animation resolution detected a TAE reference loop at '{FormatAnimationKey(animation.ID)}'.");
+
+            if (animation.Header is TAE.Animation.AnimFileHeader.ImportOtherAnim importOtherAnim)
+            {
+                if (importOtherAnim.ImportFromAnimID < 0)
+                    throw new InvalidOperationException($"TAE animation '{FormatAnimationKey(animation.ID)}' imports another animation but does not declare a valid source anim ID.");
+
+                if (!animationIndex.TryGetValue(importOtherAnim.ImportFromAnimID, out var nextAnimation))
+                    throw new InvalidOperationException($"TAE animation '{FormatAnimationKey(animation.ID)}' references missing animation '{FormatAnimationKey(importOtherAnim.ImportFromAnimID)}'.");
+
+                return ResolveTaeReferenceChain(nextAnimation, animationIndex, visitedIds);
+            }
+
+            return animation;
+        }
+
+        static long ResolveHkxId(TAE.Animation animation)
+        {
+            if (animation?.Header is TAE.Animation.AnimFileHeader.Standard standardHeader
+                && standardHeader.ImportsHKX
+                && standardHeader.ImportHKXSourceAnimID >= 0)
+            {
+                return standardHeader.ImportHKXSourceAnimID;
+            }
+
+            return animation?.ID ?? -1;
+        }
+
+        static FormalAnimationResolution ResolveFormalAnimationForSkill(
+            IReadOnlyList<FormalAnimationResolution> resolutions,
+            TAE.Animation animation)
+        {
+            if (animation == null)
+                return null;
+
+            string requestName = FormatAnimationKey(animation.ID);
+            string sourceStem = NormalizeAnimationReference(GetSourceAnimationFileName(animation));
+
+            return resolutions.FirstOrDefault(resolution =>
+                resolution.RequestTaeId == animation.ID
+                || string.Equals(resolution.RequestTaeName, requestName, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrWhiteSpace(sourceStem) && string.Equals(resolution.SourceAnimStem, sourceStem, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        static string ResolveAnimationExportFilter(string animationFilter, IReadOnlyList<FormalAnimationResolution> resolutions)
+        {
+            if (string.IsNullOrWhiteSpace(animationFilter))
+                return null;
+
+            if (resolutions != null && resolutions.Count == 1)
+                return resolutions[0].SourceAnimStem;
+
+            return NormalizeAnimationReference(animationFilter);
+        }
+
+        static long ParseAnimationKeyToId(string animationKey)
+        {
+            if (string.IsNullOrWhiteSpace(animationKey))
+                return -1;
+
+            string normalized = NormalizeAnimationReference(animationKey);
+            if (normalized.Length != 11 || normalized[0] != 'a' || normalized[4] != '_')
+                return -1;
+
+            if (!int.TryParse(normalized.Substring(1, 3), out int prefix))
+                return -1;
+            if (!int.TryParse(normalized.Substring(5, 6), out int suffix))
+                return -1;
+
+            return (prefix * 1000000L) + suffix;
         }
 
         static TAE MergeFormalTaeSources(TAE existing, TAE next)
@@ -1219,6 +1714,21 @@ namespace SekiroExporter
 
             if (matchingAnimations.Count == 0)
                 throw new InvalidOperationException($"Formal skill source '{Path.GetFileName(sourcePath)}' does not contain TAE animation '{normalizedFilter}'.");
+
+            var exactKeyMatches = matchingAnimations
+                .Where(animation => string.Equals(FormatAnimationKey(animation.ID), normalizedFilter, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (exactKeyMatches.Count > 0)
+                matchingAnimations = exactKeyMatches;
+
+            var distinctSignatures = matchingAnimations
+                .GroupBy(BuildFormalAnimationSignature, StringComparer.Ordinal)
+                .ToList();
+
+            if (distinctSignatures.Count > 1)
+                throw new InvalidOperationException($"Formal skill source '{Path.GetFileName(sourcePath)}' contains multiple distinct TAE entries for '{normalizedFilter}'.");
+
+            matchingAnimations = new List<TAE.Animation> { distinctSignatures[0].First() };
 
             return new TAE
             {
@@ -1378,6 +1888,22 @@ namespace SekiroExporter
         {
             string deliverablePath = FindExportedFile(animDir, animName, new[] { ".gltf" });
             return deliverablePath != null ? Path.GetFileName(deliverablePath) : null;
+        }
+
+        static string ExtractFormalSkeletonRoot(string gltfPath)
+        {
+            string json = File.ReadAllText(gltfPath);
+            var root = JObject.Parse(json);
+            var skins = root["skins"] as JArray;
+            var nodes = root["nodes"] as JArray;
+            if (skins == null || skins.Count == 0 || nodes == null)
+                return string.Empty;
+
+            int skeletonIndex = (int?)skins[0]?["skeleton"] ?? -1;
+            if (skeletonIndex < 0 || skeletonIndex >= nodes.Count)
+                return string.Empty;
+
+            return (string)nodes[skeletonIndex]?["name"] ?? string.Empty;
         }
 
         static T RunWithIsolatedSekiroDocumentContext<T>(Func<T> callback)

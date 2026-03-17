@@ -9,9 +9,9 @@ using Vector3 = System.Numerics.Vector3;
 
 namespace DSAnimStudio.Export
 {
-    internal static class GltfPostProcessor
+    internal static class GltfWriterPostProcessor
     {
-        public static void PostProcess(string gltfPath, string animationName = null)
+        public static void PostProcess(string gltfPath, string expectedSkeletonRootName = null, string animationName = null)
         {
             string json = File.ReadAllText(gltfPath);
             var root = JObject.Parse(json);
@@ -70,7 +70,7 @@ namespace DSAnimStudio.Export
 
             if (nodes != null && skins != null && accessors != null && bufferViews != null && binData != null)
             {
-                if (NormalizeSkinHierarchy(nodes, skins, accessors, bufferViews, binBytes, binData))
+                if (NormalizeSkinHierarchy(nodes, skins, accessors, bufferViews, binBytes, binData, expectedSkeletonRootName))
                 {
                     modified = true;
                     binModified = true;
@@ -98,14 +98,16 @@ namespace DSAnimStudio.Export
                 File.WriteAllBytes(binPath, binData.ToArray());
             }
 
-            ValidateProcessedGltf(root, gltfPath);
+            if (ValidateProcessedGltf(root, gltfPath, expectedSkeletonRootName))
+                modified = true;
 
             if (modified)
                 File.WriteAllText(gltfPath, root.ToString());
         }
 
-        private static void ValidateProcessedGltf(JObject root, string gltfPath)
+        private static bool ValidateProcessedGltf(JObject root, string gltfPath, string expectedSkeletonRootName)
         {
+            bool modified = false;
             var buffers = root["buffers"] as JArray;
             if (buffers != null)
             {
@@ -119,17 +121,47 @@ namespace DSAnimStudio.Export
 
             var accessors = root["accessors"] as JArray;
             var skins = root["skins"] as JArray;
+            var nodes = root["nodes"] as JArray;
+            var formalJointSet = new HashSet<int>();
+            int? uniqueSkeletonRoot = null;
+            Dictionary<int, int> parents = null;
             if (skins != null)
             {
+                Dictionary<int, int> depths = null;
                 foreach (var skinObj in skins.OfType<JObject>())
                 {
+                    var joints = skinObj["joints"] as JArray;
                     int skeletonIndex = (int?)skinObj["skeleton"] ?? -1;
+                    if (skeletonIndex < 0 && nodes != null && joints != null && joints.Count > 0)
+                    {
+                        parents ??= BuildParentMap(nodes);
+                        depths ??= BuildDepthMap(nodes, parents);
+                        skeletonIndex = DetermineSkinRoot(nodes, joints, parents, depths, expectedSkeletonRootName);
+                        skinObj["skeleton"] = skeletonIndex;
+                        modified = true;
+                    }
+
                     if (skeletonIndex < 0)
                         throw new InvalidOperationException("glTF skin is missing a formal skeleton root.");
 
-                    var joints = skinObj["joints"] as JArray;
+                    if (!string.IsNullOrWhiteSpace(expectedSkeletonRootName))
+                    {
+                        int declaredSkeletonIndex = ResolveDeclaredSkeletonRootIndex(nodes, expectedSkeletonRootName);
+                        if (declaredSkeletonIndex != skeletonIndex)
+                            throw new InvalidOperationException($"glTF skin skeleton root '{GetNodeName(nodes, skeletonIndex)}' did not match declared formal skeleton root '{expectedSkeletonRootName}'.");
+                    }
+
                     if (joints == null || joints.Count == 0)
                         throw new InvalidOperationException("glTF skin has no joints after post-process.");
+
+                    foreach (int jointIndex in joints.Values<int>())
+                        formalJointSet.Add(jointIndex);
+
+                    if (uniqueSkeletonRoot.HasValue && uniqueSkeletonRoot.Value != skeletonIndex)
+                        throw new InvalidOperationException("Formal glTF contains multiple distinct skeleton roots.");
+
+                    uniqueSkeletonRoot = skeletonIndex;
+                    formalJointSet.Add(skeletonIndex);
 
                     int accessorIndex = (int?)skinObj["inverseBindMatrices"] ?? -1;
                     if (accessors == null || accessorIndex < 0 || accessorIndex >= accessors.Count)
@@ -148,7 +180,6 @@ namespace DSAnimStudio.Export
                 if (animations.Count != 1)
                     throw new InvalidOperationException($"Formal animation glTF must contain exactly one animation entry, found {animations.Count}.");
 
-                var nodes = root["nodes"] as JArray;
                 var channels = animations[0]?["channels"] as JArray;
                 if (channels == null || channels.Count == 0)
                     throw new InvalidOperationException("Formal animation glTF contains no channels.");
@@ -160,8 +191,16 @@ namespace DSAnimStudio.Export
                         throw new InvalidOperationException("Formal animation glTF references an invalid node.");
                     if (nodes[nodeIndex]?["matrix"] != null)
                         throw new InvalidOperationException($"Animated node {nodeIndex} still contains a matrix transform after post-process.");
+                    if (formalJointSet.Count > 0 && !formalJointSet.Contains(nodeIndex) && (!uniqueSkeletonRoot.HasValue || nodeIndex != uniqueSkeletonRoot.Value))
+                    {
+                        parents ??= BuildParentMap(nodes);
+                        if (!uniqueSkeletonRoot.HasValue || !IsNodeDescendantOf(nodeIndex, uniqueSkeletonRoot.Value, parents))
+                            throw new InvalidOperationException($"Formal animation channel targets node '{GetNodeName(nodes, nodeIndex)}' ({nodeIndex}) outside the declared formal skeleton hierarchy.");
+                    }
                 }
             }
+
+            return modified;
         }
 
         private static bool ConvertJointAccessorToUnsignedShort(int accessorIndex, JArray accessors, JArray bufferViews,
@@ -221,7 +260,7 @@ namespace DSAnimStudio.Export
         }
 
         private static bool NormalizeSkinHierarchy(JArray nodes, JArray skins, JArray accessors, JArray bufferViews,
-            byte[] binBytes, List<byte> binData)
+            byte[] binBytes, List<byte> binData, string expectedSkeletonRootName = null)
         {
             bool modified = false;
             var parents = BuildParentMap(nodes);
@@ -233,42 +272,28 @@ namespace DSAnimStudio.Export
                 if (joints == null || joints.Count == 0)
                     continue;
 
-                int skeletonRoot = DetermineSkinRoot(nodes, joints, parents, depths);
+                int skeletonRoot = DetermineSkinRoot(nodes, joints, parents, depths, expectedSkeletonRootName);
                 if ((int?)skinObj["skeleton"] != skeletonRoot)
                 {
                     skinObj["skeleton"] = skeletonRoot;
                     modified = true;
                 }
 
-                var fullJointList = CollectSkeletonJointNodes(nodes, skeletonRoot);
-                if (fullJointList.Count == 0)
-                    continue;
-
                 int? existingAccessorIndex = (int?)skinObj["inverseBindMatrices"];
-                var matricesByJoint = ReadExistingInverseBindMatrices(joints, existingAccessorIndex, accessors, bufferViews, binBytes);
-                var finalMatrices = new List<Matrix4x4>(fullJointList.Count);
-                foreach (int jointIndex in fullJointList)
+                var finalMatrices = new List<Matrix4x4>(joints.Count);
+                foreach (int jointIndex in joints.Values<int>())
                 {
-                    if (!matricesByJoint.TryGetValue(jointIndex, out Matrix4x4 inverseBind))
-                    {
-                        Matrix4x4 world = ComputeWorldMatrix(nodes, parents, jointIndex);
-                        Matrix4x4.Invert(world, out inverseBind);
-                    }
-
+                    Matrix4x4 world = ComputeWorldMatrix(nodes, parents, jointIndex);
+                    Matrix4x4.Invert(world, out Matrix4x4 inverseBind);
                     finalMatrices.Add(inverseBind);
                 }
 
                 int newAccessorIndex = AppendMatrixAccessor(accessors, bufferViews, binData, finalMatrices);
-                skinObj["inverseBindMatrices"] = newAccessorIndex;
-
-                var finalJoints = new JArray(fullJointList);
-                if (!JToken.DeepEquals(joints, finalJoints))
+                if (existingAccessorIndex != newAccessorIndex)
                 {
-                    skinObj["joints"] = finalJoints;
+                    skinObj["inverseBindMatrices"] = newAccessorIndex;
                     modified = true;
                 }
-
-                modified = true;
             }
 
             return modified;
@@ -541,8 +566,11 @@ namespace DSAnimStudio.Export
         }
 
         private static int DetermineSkinRoot(JArray nodes, JArray joints, Dictionary<int, int> parents,
-            Dictionary<int, int> depths)
+            Dictionary<int, int> depths, string expectedSkeletonRootName = null)
         {
+            if (!string.IsNullOrWhiteSpace(expectedSkeletonRootName))
+                return ResolveDeclaredSkeletonRootIndex(nodes, expectedSkeletonRootName);
+
             var jointList = joints.Values<int>().ToList();
             HashSet<int> commonAncestors = null;
 
@@ -566,15 +594,66 @@ namespace DSAnimStudio.Export
             if (commonAncestors == null || commonAncestors.Count == 0)
                 return jointList.Count > 0 ? jointList[0] : 0;
 
-            int preferred = commonAncestors
-                .OrderBy(idx => depths.TryGetValue(idx, out int depth) ? depth : int.MaxValue)
-                .FirstOrDefault(idx => IsPreferredSkeletonRoot(nodes[idx] as JObject));
-            if (preferred != 0 || IsPreferredSkeletonRoot(nodes[0] as JObject))
-                return preferred;
+            int? preferred = commonAncestors
+                .Where(idx => IsPreferredSkeletonRoot(nodes[idx] as JObject))
+                .OrderByDescending(idx => depths.TryGetValue(idx, out int depth) ? depth : int.MinValue)
+                .Cast<int?>()
+                .FirstOrDefault();
+            if (preferred.HasValue)
+                return preferred.Value;
 
             return commonAncestors
-                .OrderBy(idx => depths.TryGetValue(idx, out int depth) ? depth : int.MaxValue)
+                .OrderByDescending(idx => depths.TryGetValue(idx, out int depth) ? depth : int.MinValue)
                 .First();
+        }
+
+        private static int ResolveDeclaredSkeletonRootIndex(JArray nodes, string expectedSkeletonRootName)
+        {
+            if (nodes == null)
+                throw new InvalidOperationException("glTF nodes are missing while resolving the declared formal skeleton root.");
+
+            var matches = new List<int>();
+            for (int nodeIndex = 0; nodeIndex < nodes.Count; nodeIndex++)
+            {
+                var node = nodes[nodeIndex] as JObject;
+                if (node == null || node["mesh"] != null)
+                    continue;
+
+                string nodeName = (string)node["name"];
+                if (string.Equals(nodeName, expectedSkeletonRootName, StringComparison.Ordinal))
+                    matches.Add(nodeIndex);
+            }
+
+            if (matches.Count == 1)
+                return matches[0];
+
+            if (matches.Count == 0)
+                throw new InvalidOperationException($"Declared formal skeleton root '{expectedSkeletonRootName}' was not found in glTF nodes.");
+
+            throw new InvalidOperationException($"Declared formal skeleton root '{expectedSkeletonRootName}' matched multiple glTF nodes.");
+        }
+
+        private static string GetNodeName(JArray nodes, int nodeIndex)
+        {
+            if (nodes == null || nodeIndex < 0 || nodeIndex >= nodes.Count)
+                return string.Empty;
+
+            return (string)(nodes[nodeIndex] as JObject)?["name"] ?? string.Empty;
+        }
+
+        private static bool IsNodeDescendantOf(int nodeIndex, int rootIndex, Dictionary<int, int> parents)
+        {
+            int current = nodeIndex;
+            while (current >= 0)
+            {
+                if (current == rootIndex)
+                    return true;
+
+                if (!parents.TryGetValue(current, out current))
+                    break;
+            }
+
+            return false;
         }
 
         private static bool IsPreferredSkeletonRoot(JObject node)
@@ -588,34 +667,6 @@ namespace DSAnimStudio.Export
 
             return !string.Equals(name, "Armature", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(name, "RootNode", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static List<int> CollectSkeletonJointNodes(JArray nodes, int skeletonRoot)
-        {
-            var result = new List<int>();
-
-            void Traverse(int nodeIndex)
-            {
-                if (nodeIndex < 0 || nodeIndex >= nodes.Count)
-                    return;
-
-                var node = nodes[nodeIndex] as JObject;
-                if (node == null)
-                    return;
-
-                if (node["mesh"] == null)
-                    result.Add(nodeIndex);
-
-                var children = node["children"] as JArray;
-                if (children == null)
-                    return;
-
-                foreach (int child in children.Values<int>())
-                    Traverse(child);
-            }
-
-            Traverse(skeletonRoot);
-            return result;
         }
 
         private static Matrix4x4 ComputeWorldMatrix(JArray nodes, Dictionary<int, int> parents, int nodeIndex)

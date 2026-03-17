@@ -28,6 +28,15 @@
 - **当** 当前角色的 TAE/ANIBND 中存在多个可能对应请求的动画候选
 - **那么** 正式导出必须按预定义规则完成唯一求解，否则该动画必须失败并记录歧义原因
 
+### 需求:主角多 TAE 文件必须保留 bind/category 身份
+对于 Sekiro 主角等由多个 TAE binder file 组成的 ANIBND，正式链路必须保留 `taeBindIndex/category` 身份，并按编辑器现有 `SplitAnimID` 语义解释动画条目、引用链和 HKX 绑定。禁止把多个 TAE 文件先 merge 成只剩本地 `TAE.Animation.ID` 的扁平集合，再按裸动画 ID 过滤。
+
+#### 场景:主角 `c0000.anibnd.dcx` 中多个 TAE 文件都包含本地 ID `100`
+- **当** 主角 skill source 中不同 `taeBindIndex` 的 TAE 文件都存在本地动画条目 `100`
+- **那么** 正式链路必须先以 full ID 区分这些条目，例如 `a000_000100` 与 `a001_000100`
+- **并且** 正式链路必须沿用同一 full-ID 语义解释 `ImportOtherAnim.ImportFromAnimID` 与 `ImportHKXSourceAnimID`
+- **并且** 如果 full-ID 仍然无法唯一求解，必须显式失败，而不是把多个 category 的候选压成一个裸 ID
+
 ### 需求:正式交付与报告必须复用求解元数据
 正式动画交付文件命名、技能配置动画元数据和角色验收报告必须复用同一份动画求解元数据，确保 CLI、导出物和验收报告可以互相校验。
 
