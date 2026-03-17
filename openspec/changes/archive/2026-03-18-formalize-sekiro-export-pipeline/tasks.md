@@ -1,3 +1,5 @@
+> 归档说明：本变更的未完成任务已续接到 `add-sekiro-ue-skill-and-asset-pipeline`，当前文件保留原始勾选状态作为历史记录。
+
 ## 1. 正式合同冻结
 
 - [x] 1.1 将 CLI 正式导出模式的唯一模型/动画格式固定为 `glTF 2.0 (.gltf + .bin)`，移除正式模式下的 `fbx/fbxa/glb/dae` 成功判定

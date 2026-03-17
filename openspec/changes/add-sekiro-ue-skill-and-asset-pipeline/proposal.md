@@ -1,0 +1,42 @@
+## 为什么
+
+当前导出链路已经能产出 Sekiro 的部分模型、动画、纹理和技能配置，但 UE 工程 `SekiroSkillEditor` 还缺少把这些正式产物完整接回来的契约：材质和纹理导入没有被要求形成可工作的 UE 材质实例，技能 JSON 虽然可导出，但 UE 侧没有被要求完整复刻 Sekiro 的战斗语义、DummyPoly 关联和义手/战技覆盖结果。
+
+继续只做“导出成功”或“UE 里看得到资产”的交付，会让导出端与 UE 端长期脱节。现在需要把导出工具、导入脚本和 UE 编辑器插件收敛成一条完整的 Sekiro 资产与技能复刻链路，明确什么才算正式完成。
+
+## 变更内容
+
+- **BREAKING** 将 `SekiroSkillEditor` 的完成标准从“能导入部分资产并显示时间轴”提升为“能基于正式导出产物完整复刻模型、动画、材质、纹理和技能语义”；缺少任一正式输入或任一关键复刻结果时，导入与验收都必须失败
+- 扩展导出工具正式合同，要求 `SekiroExporter` 为 UE 侧交付完整且可追溯的 Sekiro 资产包，包括模型、动画、PNG 纹理、材质清单、技能配置、参数关联和复刻所需的元数据
+- 收紧 UE5 批量导入脚本合同，要求其不仅导入骨骼资产，还必须建立纹理、材质实例、技能数据资产、参数索引和资源间引用关系
+- 收紧 `SekiroSkillEditor` 插件合同，要求其在编辑器内完整重建 Sekiro 技能系统的关键语义，包括战斗事件、DummyPoly 位置、参数链路、义手忍具覆盖和战技样式检查
+- 补充角色级端到端验收，要求对单个角色明确验证“导出资产完整性 + UE 导入完整性 + 编辑器复刻能力”三者同时成立
+
+## 功能 (Capabilities)
+
+### 新增功能
+- `sekiro-ue-replica-validation`: 定义 Sekiro 角色在 UE 侧的完整复刻验收合同，覆盖导出产物完整性、导入完整性和技能语义复刻结果
+
+### 修改功能
+- `sekiro-exporter-cli`: 将 CLI 正式交付物扩展为 UE 可直接消费且可验证的 Sekiro 资产包，要求角色级导出摘要明确记录材质、纹理、技能与参数链路完整性
+- `skill-config-export`: 将技能配置导出从“事件 JSON”提升为“可在 UE 侧复刻 Sekiro 战斗语义的正式交付物”，要求输出 DummyPoly、BehaviorParam、AtkParam、SpEffect、义手覆盖和战技关联的可追溯关系
+- `material-manifest-export`: 将材质清单从纹理槽位映射扩展为可驱动 UE 材质实例重建的正式清单，要求记录材质实例创建和纹理绑定所需的稳定键
+- `texture-export`: 将纹理导出要求收紧为服务 UE 材质重建的正式输入，要求 PNG 输出、命名和清单映射能一一对齐且失败可追溯
+- `ue5-import-scripts`: 将 Python 导入脚本从“批量导入资产”扩展为“建立角色级资源关系和材质/技能装配”的正式导入管线
+- `ue5-skill-editor-plugin`: 将插件正式目标收紧为 Sekiro 技能系统复刻器，而不只是浏览器；要求编辑器能消费正式导出资产并验证战斗语义、材质配置和角色级复刻结果
+
+## 影响
+
+- 受影响代码主要位于 `SekiroExporter/`、`DSAnimStudioNETCore/Export/`、`SekiroSkillEditor/Source/` 以及可能新增或调整的 UE Python 导入脚本目录
+- 现有正式 specs `sekiro-exporter-cli`、`skill-config-export`、`material-manifest-export`、`texture-export`、`ue5-import-scripts` 和 `ue5-skill-editor-plugin` 都会被收紧；现有只保证“资产存在”的实现不再满足完成标准
+- 这项变更会把角色级成功定义改为 fail-closed：导出端缺材质/纹理/技能关联，或 UE 端未生成正确材质实例、参数索引、技能资产、视口复刻结果时，都不得报告成功
+- UE 工程 `SekiroSkillEditor` 将从演示型工具提升为正式验收入口，因此需要同步更新编辑器 UI、数据资产、导入验证器和批处理工作流
+
+## 继承的正式化遗留项
+
+本变更继续承接 `formalize-sekiro-export-pipeline` 中尚未完成、但已经明确属于 UE 资产闭环的剩余范围，避免在归档后丢失正式化上下文：
+
+- 继续收紧 `texture-export`，补齐 Sekiro 实际纹理编码支持矩阵、PNG 正式命名契约以及与材质清单的一一对应关系
+- 将 UE 导入验收从“可导入”提升为“必须形成 SkeletalMesh + Skeleton + PhysicsAsset + 正确动画绑定”的角色级硬性判定
+- 把 `c0000` 之外的角色回归、正式统计基线重建，以及旧日志/旧选项清理纳入后续正式化闭环
+- 承接原变更中需要在 DSAnimStudio/UE 编辑器内手动验证的菜单、时间轴、3D 视口、攻击判定、特效点、音效点与正式语义复刻工作
