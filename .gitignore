@@ -329,3 +329,9 @@ ASALocalRun/
 # MFractors (Xamarin productivity tool) working folder 
 .mfractor/
 _ExportCheck/
+SekiroSkillEditor/SekiroSkillEditor.sln
+SekiroSkillEditor/Binaries/
+SekiroSkillEditor/.vsconfig
+SekiroSkillEditor/DerivedDataCache/
+SekiroSkillEditor/Intermediate/
+SekiroSkillEditor/Saved/

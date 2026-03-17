@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Sekiro Skill Editor",
+	"Description": "Import and visualize Sekiro combat skills with timeline editing and 3D preview",
+	"Category": "Animation",
+	"CreatedBy": "SekiroModTools",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"Modules": [
+		{
+			"Name": "SekiroSkillEditorPlugin",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

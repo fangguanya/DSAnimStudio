@@ -8,9 +8,19 @@ namespace DSAnimStudioNETCore.Tests.Export
     public class AssimpExportTransformUtilsTests
     {
         [Test]
-        public void ConvertSourceVectorToGltf_MapsSourceForwardToPositiveY()
+        public void ConvertSourceVectorToGltf_MapsSourceForwardToPositiveZ()
         {
             var result = AssimpExportTransformUtils.ConvertSourceVectorToGltf(Vector3.UnitZ);
+
+            Assert.That(result.X, Is.EqualTo(0).Within(1e-5));
+            Assert.That(result.Y, Is.EqualTo(0).Within(1e-5));
+            Assert.That(result.Z, Is.EqualTo(-1).Within(1e-5));
+        }
+
+        [Test]
+        public void ConvertSourceVectorToGltf_MapsSourceUpToPositiveY()
+        {
+            var result = AssimpExportTransformUtils.ConvertSourceVectorToGltf(Vector3.UnitY);
 
             Assert.That(result.X, Is.EqualTo(0).Within(1e-5));
             Assert.That(result.Y, Is.EqualTo(1).Within(1e-5));
@@ -18,21 +28,11 @@ namespace DSAnimStudioNETCore.Tests.Export
         }
 
         [Test]
-        public void ConvertSourceVectorToGltf_MapsSourceUpToPositiveZ()
-        {
-            var result = AssimpExportTransformUtils.ConvertSourceVectorToGltf(Vector3.UnitY);
-
-            Assert.That(result.X, Is.EqualTo(0).Within(1e-5));
-            Assert.That(result.Y, Is.EqualTo(0).Within(1e-5));
-            Assert.That(result.Z, Is.EqualTo(1).Within(1e-5));
-        }
-
-        [Test]
         public void ConvertSourceVectorToGltf_MapsSourcePositiveXToNegativeX()
         {
             var result = AssimpExportTransformUtils.ConvertSourceVectorToGltf(Vector3.UnitX);
 
-            Assert.That(result.X, Is.EqualTo(1).Within(1e-5));
+            Assert.That(result.X, Is.EqualTo(-1).Within(1e-5));
             Assert.That(result.Y, Is.EqualTo(0).Within(1e-5));
             Assert.That(result.Z, Is.EqualTo(0).Within(1e-5));
         }

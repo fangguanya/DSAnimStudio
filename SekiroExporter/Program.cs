@@ -1271,8 +1271,7 @@ namespace SekiroExporter
 
         static void ReadFormalWeaponRows(BND4 paramBinder, Dictionary<int, FormalWeaponRow> destination)
         {
-            var param = ReadParamFromBinder(paramBinder, "EquipParamWeapon");
-            try
+            WithRawParamFromBinder(paramBinder, "EquipParamWeapon", param =>
             {
                 foreach (var row in param.Rows)
                 {
@@ -1283,17 +1282,12 @@ namespace SekiroExporter
                     short equipModelId = reader.ReadInt16();
                     destination[row.ID] = new FormalWeaponRow { EquipModelID = equipModelId };
                 }
-            }
-            finally
-            {
-                param.DisposeRowReader();
-            }
+            });
         }
 
         static void ReadFormalProtectorRows(BND4 paramBinder, Dictionary<int, FormalProtectorRow> destination)
         {
-            var param = ReadParamFromBinder(paramBinder, "EquipParamProtector");
-            try
+            WithRawParamFromBinder(paramBinder, "EquipParamProtector", param =>
             {
                 foreach (var row in param.Rows)
                 {
@@ -1318,11 +1312,7 @@ namespace SekiroExporter
                         LegEquip = firstBitmask[4],
                     };
                 }
-            }
-            finally
-            {
-                param.DisposeRowReader();
-            }
+            });
         }
 
         sealed class AnibndSourceInfo
@@ -1789,16 +1779,42 @@ namespace SekiroExporter
 
         static PARAM ReadParamFromBinder(BND4 paramBinder, string paramName)
         {
+            return PARAM.Read(ReadRequiredBinderEntryBytes(paramBinder, paramName));
+        }
+
+        static PARAM_Hack ReadRawParamFromBinder(BND4 paramBinder, string paramName)
+        {
+            return PARAM_Hack.Read(ReadRequiredBinderEntryBytes(paramBinder, paramName));
+        }
+
+        static void WithRawParamFromBinder(BND4 paramBinder, string paramName, Action<PARAM_Hack> action)
+        {
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+
+            var param = ReadRawParamFromBinder(paramBinder, paramName);
+            try
+            {
+                action(param);
+            }
+            finally
+            {
+                param.DisposeRowReader();
+            }
+        }
+
+        static byte[] ReadRequiredBinderEntryBytes(BND4 paramBinder, string entryName)
+        {
             var binderFile = paramBinder.Files.FirstOrDefault(file =>
-                file.Name != null && file.Name.IndexOf(paramName, StringComparison.OrdinalIgnoreCase) >= 0);
+                file.Name != null && file.Name.IndexOf(entryName, StringComparison.OrdinalIgnoreCase) >= 0);
             if (binderFile == null)
-                throw new InvalidOperationException($"Formal param '{paramName}' not found in Sekiro gameparam binder.");
+                throw new InvalidOperationException($"Formal param '{entryName}' not found in Sekiro gameparam binder.");
 
-            byte[] paramBytes = binderFile.Bytes;
-            if (DCX.Is(paramBytes))
-                paramBytes = DCX.Decompress(paramBytes);
+            byte[] entryBytes = binderFile.Bytes;
+            if (DCX.Is(entryBytes))
+                entryBytes = DCX.Decompress(entryBytes);
 
-            return PARAM.Read(paramBytes);
+            return entryBytes;
         }
 
         static List<bool> ReadBitmask(BinaryReaderEx reader, int bitCount)
@@ -1845,8 +1861,7 @@ namespace SekiroExporter
         static void ReadTypedParamRows<T>(BND4 paramBinder, string paramName, Dictionary<long, T> destination)
             where T : ParamData, new()
         {
-            var param = ReadParamFromBinder(paramBinder, paramName);
-            try
+            WithRawParamFromBinder(paramBinder, paramName, param =>
             {
                 foreach (var row in param.Rows)
                 {
@@ -1858,11 +1873,7 @@ namespace SekiroExporter
                     entry.Read(param.GetRowReader(row));
                     destination[row.ID] = entry;
                 }
-            }
-            finally
-            {
-                param.DisposeRowReader();
-            }
+            });
         }
 
         static JObject BuildCanonicalParamPayload(ParamExporter exporter, FormalSekiroSkillParams formalParams)

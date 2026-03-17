@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.7",
+	"Category": "Games",
+	"Description": "Sekiro Skill Editor - Visualize and edit Sekiro combat skills",
+	"Modules": [
+		{
+			"Name": "SekiroSkillEditor",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "SekiroSkillEditorPlugin",
+			"Enabled": true
+		}
+	]
+}

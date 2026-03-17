@@ -89,16 +89,22 @@ namespace DSAnimStudio.Export
             var metrics = Analyze(root, expectedSkeletonRootName);
             var failures = new List<string>();
 
-            float faceScore = Vector3.Dot(metrics.FaceDirection, Vector3.UnitY);
-            if (faceScore < DirectionThreshold)
+            float upScore = Vector3.Dot(metrics.UpDirection, Vector3.UnitY);
+            if (upScore < DirectionThreshold)
             {
-                failures.Add($"Expected face +Y, got {FormatVector(metrics.FaceDirection)} (score {faceScore:F3})");
+                failures.Add($"Expected head/up +Y, got {FormatVector(metrics.UpDirection)} (score {upScore:F3})");
             }
 
-            float rightHandScore = Vector3.Dot(metrics.RightHandDirection, -Vector3.UnitX);
+            float faceScore = Vector3.Dot(metrics.FaceDirection, Vector3.UnitZ);
+            if (faceScore < DirectionThreshold)
+            {
+                failures.Add($"Expected face +Z, got {FormatVector(metrics.FaceDirection)} (score {faceScore:F3})");
+            }
+
+            float rightHandScore = Vector3.Dot(metrics.RightHandDirection, Vector3.UnitX);
             if (rightHandScore < DirectionThreshold)
             {
-                failures.Add($"Expected R_Hand toward -X, got {FormatVector(metrics.RightHandDirection)} (score {rightHandScore:F3})");
+                failures.Add($"Expected R_Hand toward +X, got {FormatVector(metrics.RightHandDirection)} (score {rightHandScore:F3})");
             }
 
             if (failures.Count > 0)

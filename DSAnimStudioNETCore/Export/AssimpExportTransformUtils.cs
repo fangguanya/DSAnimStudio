@@ -11,17 +11,11 @@ namespace DSAnimStudio.Export
 {
     internal static class AssimpExportTransformUtils
     {
-        public static readonly Matrix4x4 SourceToGltfBasis = new Matrix4x4(
-            0, 1, 0, 0,
-            -1, 0, 0, 0,
-            0, 0, -1, 0,
-            0, 0, 0, 1);
+        public static readonly Matrix4x4 SourceToGltfBasis = Matrix4x4.CreateRotationY(MathF.PI);
 
         public static readonly Matrix4x4 GltfToSourceBasis = Matrix4x4.Transpose(SourceToGltfBasis);
 
-        public static readonly Matrix4x4 PostTransformCorrectionGltf =
-            Matrix4x4.CreateRotationX(MathF.PI / 2)
-            * Matrix4x4.CreateRotationY(MathF.PI / 2);
+        public static readonly Matrix4x4 PostTransformCorrectionGltf = Matrix4x4.Identity;
 
         public static readonly Matrix4x4 SourceToGltfTransform = SourceToGltfBasis * PostTransformCorrectionGltf;
 
