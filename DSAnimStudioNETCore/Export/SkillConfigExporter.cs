@@ -36,13 +36,20 @@ namespace DSAnimStudio.Export
         {
             ["b"] = 1,
             ["u8"] = 1,
+            ["x8"] = 1,
             ["s8"] = 1,
             ["u16"] = 2,
+            ["x16"] = 2,
             ["s16"] = 2,
             ["u32"] = 4,
             ["s32"] = 4,
             ["f32"] = 4,
             ["x32"] = 4,
+            ["u64"] = 8,
+            ["x64"] = 8,
+            ["s64"] = 8,
+            ["f64"] = 8,
+            ["f32grad"] = 8,
         };
 
         public class TaeEventTemplate
@@ -116,6 +123,9 @@ namespace DSAnimStudio.Export
 
                 _eventTemplates[template.TypeId] = template;
             }
+
+            if (_eventTemplates.Count == 0)
+                throw new InvalidOperationException($"No TAE event templates were loaded from '{templatePath}'.");
         }
 
         /// <summary>
@@ -125,6 +135,9 @@ namespace DSAnimStudio.Export
         {
             if (tae == null)
                 throw new ArgumentNullException(nameof(tae));
+
+            if (_eventTemplates == null || _eventTemplates.Count == 0)
+                throw new InvalidOperationException("Formal skill export requires a loaded TAE template.");
 
             context ??= new SkillConfigExportContext();
 
@@ -152,9 +165,14 @@ namespace DSAnimStudio.Export
             foreach (var anim in tae.Animations)
             {
                 string animName = FormatAnimationKey(anim.ID);
-                string resolvedFileName = context.ResolveAnimationFileName?.Invoke(animName);
+                string sourceAnimFileName = GetSourceAnimationFileName(anim);
+                string resolutionKey = NormalizeAnimationReference(sourceAnimFileName);
+                if (string.IsNullOrWhiteSpace(resolutionKey))
+                    resolutionKey = animName;
+
+                string resolvedFileName = context.ResolveAnimationFileName?.Invoke(resolutionKey);
                 if (string.IsNullOrWhiteSpace(resolvedFileName))
-                    resolvedFileName = $"{animName}.gltf";
+                    throw new InvalidOperationException($"Formal skill export requires a matching exported animation deliverable for '{animName}' (resolved via '{resolutionKey}').");
 
                 var animObj = new JObject
                 {
@@ -165,7 +183,6 @@ namespace DSAnimStudio.Export
                     ["frameCount"] = ResolveFrameCount(anim, context.FrameRate),
                 };
 
-                string sourceAnimFileName = GetSourceAnimationFileName(anim);
                 if (!string.IsNullOrWhiteSpace(sourceAnimFileName))
                     animObj["sourceAnimFileName"] = sourceAnimFileName;
 
@@ -175,8 +192,18 @@ namespace DSAnimStudio.Export
                 {
                     foreach (var action in anim.Actions)
                     {
-                        var eventObj = SerializeAction(action, context.FrameRate);
-                        eventsArray.Add(eventObj);
+                        try
+                        {
+                            var eventObj = SerializeAction(action, context.FrameRate);
+                            eventsArray.Add(eventObj);
+                        }
+                        catch (Exception ex)
+                        {
+                            int paramByteCount = action?.ParameterBytes?.Length ?? 0;
+                            throw new InvalidOperationException(
+                                $"Formal skill export failed for animation '{animName}' (id={anim.ID}) event type {action?.Type} with {paramByteCount} parameter bytes: {ex.Message}",
+                                ex);
+                        }
                     }
                 }
 
@@ -209,7 +236,21 @@ namespace DSAnimStudio.Export
             TaeEventTemplate template = null;
             _eventTemplates?.TryGetValue(action.Type, out template);
 
-            obj["typeName"] = template?.TypeName ?? $"Event_{action.Type}";
+            if (template == null)
+                throw new InvalidOperationException($"No formal TAE template definition exists for event type {action.Type}.");
+
+            int expectedByteCount = GetExpectedParameterByteCount(template);
+            int actualByteCount = action.ParameterBytes?.Length ?? 0;
+            if (actualByteCount < expectedByteCount)
+            {
+                string rawBytes = actualByteCount == 0
+                    ? "<empty>"
+                    : BitConverter.ToString(action.ParameterBytes).Replace("-", string.Empty);
+                throw new InvalidOperationException(
+                    $"Template for event type {action.Type} expects at least {expectedByteCount} parameter bytes, but TAE action contains {actualByteCount} bytes (raw={rawBytes}).");
+            }
+
+            obj["typeName"] = template.TypeName;
 
             // Serialize parameters
             var paramsArray = new JArray();
@@ -231,12 +272,7 @@ namespace DSAnimStudio.Export
                         string.IsNullOrWhiteSpace(paramDef.Name) ? "template-missing-name" : "template"));
                 }
 
-                if (offset < paramBytes.Length)
-                    paramsArray.Add(CreateRawTailEntry(paramBytes, offset));
-            }
-            else if (action.ParameterBytes != null)
-            {
-                paramsArray.Add(CreateRawTailEntry(action.ParameterBytes, 0));
+                ValidateTrailingZeroPadding(action.Type, paramBytes, offset);
             }
 
             obj["params"] = paramsArray;
@@ -263,28 +299,43 @@ namespace DSAnimStudio.Export
             return result;
         }
 
-        private static JObject CreateRawTailEntry(byte[] bytes, int byteOffset)
+        private static int GetExpectedParameterByteCount(TaeEventTemplate template)
         {
-            return new JObject
+            int total = 0;
+            foreach (var param in template.Parameters)
             {
-                ["name"] = $"param_{byteOffset}",
-                ["dataType"] = "rawBytes",
-                ["byteOffset"] = byteOffset,
-                ["source"] = "template-missing",
-                ["value"] = BitConverter.ToString(bytes.Skip(byteOffset).ToArray()).Replace("-", string.Empty),
-            };
+                if (!ParamTypeSizes.TryGetValue(param.DataType ?? string.Empty, out int size))
+                    throw new NotSupportedException($"Formal skill export does not support TAE param type '{param.DataType}'.");
+
+                total += size;
+            }
+
+            return total;
+        }
+
+        private static void ValidateTrailingZeroPadding(int actionType, byte[] paramBytes, int consumedByteCount)
+        {
+            if (paramBytes == null || consumedByteCount >= paramBytes.Length)
+                return;
+
+            for (int index = consumedByteCount; index < paramBytes.Length; index++)
+            {
+                if (paramBytes[index] != 0)
+                {
+                    string rawBytes = BitConverter.ToString(paramBytes).Replace("-", string.Empty);
+                    throw new InvalidOperationException(
+                        $"Template for event type {actionType} consumed {consumedByteCount} bytes, but remaining bytes were not zero padding (raw={rawBytes}).");
+                }
+            }
         }
 
         private static object TryReadParameterValue(byte[] paramBytes, ref int offset, string dataType)
         {
             if (!ParamTypeSizes.TryGetValue(dataType ?? string.Empty, out int size))
-                size = 4;
+                throw new NotSupportedException($"Formal skill export does not support TAE param type '{dataType}'.");
 
             if (offset + size > paramBytes.Length)
-            {
-                offset = paramBytes.Length;
-                return null;
-            }
+                throw new InvalidOperationException($"TAE parameter data ended unexpectedly while reading type '{dataType}' at byte offset {offset}.");
 
             object result;
             switch ((dataType ?? string.Empty).ToLowerInvariant())
@@ -295,11 +346,17 @@ namespace DSAnimStudio.Export
                 case "u8":
                     result = (int)paramBytes[offset];
                     break;
+                case "x8":
+                    result = paramBytes[offset].ToString("X2");
+                    break;
                 case "s8":
                     result = (int)(sbyte)paramBytes[offset];
                     break;
                 case "u16":
                     result = (int)BitConverter.ToUInt16(paramBytes, offset);
+                    break;
+                case "x16":
+                    result = BitConverter.ToUInt16(paramBytes, offset).ToString("X4");
                     break;
                 case "s16":
                     result = (int)BitConverter.ToInt16(paramBytes, offset);
@@ -310,8 +367,27 @@ namespace DSAnimStudio.Export
                 case "f32":
                     result = BitConverter.ToSingle(paramBytes, offset);
                     break;
+                case "f32grad":
+                    result = new JObject
+                    {
+                        ["start"] = BitConverter.ToSingle(paramBytes, offset),
+                        ["end"] = BitConverter.ToSingle(paramBytes, offset + 4),
+                    };
+                    break;
                 case "x32":
                     result = BitConverter.ToString(paramBytes, offset, 4).Replace("-", string.Empty);
+                    break;
+                case "u64":
+                    result = BitConverter.ToUInt64(paramBytes, offset);
+                    break;
+                case "x64":
+                    result = BitConverter.ToUInt64(paramBytes, offset).ToString("X16");
+                    break;
+                case "s64":
+                    result = BitConverter.ToInt64(paramBytes, offset);
+                    break;
+                case "f64":
+                    result = BitConverter.ToDouble(paramBytes, offset);
                     break;
                 case "s32":
                 default:
@@ -332,6 +408,21 @@ namespace DSAnimStudio.Export
                 return importHeader.AnimFileName ?? string.Empty;
 
             return string.Empty;
+        }
+
+        private static string NormalizeAnimationReference(string animationReference)
+        {
+            if (string.IsNullOrWhiteSpace(animationReference))
+                return string.Empty;
+
+            string normalized = Path.GetFileNameWithoutExtension(animationReference.Trim());
+            if (normalized.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase)
+                || normalized.EndsWith(".hkt", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized = Path.GetFileNameWithoutExtension(normalized);
+            }
+
+            return normalized;
         }
 
         private static int ResolveFrameCount(TAE.Animation anim, float frameRate)

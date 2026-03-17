@@ -12,7 +12,7 @@ using PfimImageFormat = Pfim.ImageFormat;
 namespace DSAnimStudio.Export
 {
     /// <summary>
-    /// Exports TPF textures to DDS or PNG format.
+    /// Exports TPF textures to PNG format for the formal export pipeline.
     /// Uses Pfim for BC compressed texture decoding (DXT1/DXT3/DXT5/BC4/BC5/BC7).
     /// </summary>
     public class TextureExporter
@@ -28,7 +28,13 @@ namespace DSAnimStudio.Export
             public ExportFormat Format { get; set; } = ExportFormat.PNG;
 
             /// <summary>If true, skip unsupported formats instead of throwing</summary>
-            public bool SkipUnsupported { get; set; } = true;
+            public bool SkipUnsupported { get; set; } = false;
+        }
+
+        private static bool IsRgb24CompatibleFormat(PfimImageFormat format)
+        {
+            return format == PfimImageFormat.Rgb24
+                || string.Equals(format.ToString(), "Rgb8", StringComparison.OrdinalIgnoreCase);
         }
 
         private readonly ExportOptions _options;
@@ -88,7 +94,7 @@ namespace DSAnimStudio.Export
                     System.Diagnostics.Debug.WriteLine(msg);
 
                     if (!_options.SkipUnsupported)
-                        throw;
+                        throw new InvalidOperationException(msg, ex);
                 }
             }
         }
@@ -168,15 +174,10 @@ namespace DSAnimStudio.Export
                 }
                 catch (Exception ex)
                 {
-                    // Unsupported format (e.g., BC6H)
-                    string msg = $"Warning: Unsupported DDS format for '{name}': {ex.Message}";
+                    string msg = $"Unsupported DDS format for '{name}': {ex.Message}";
                     _warnings.Add(msg);
                     if (_options.SkipUnsupported)
-                    {
-                        // Fall back to DDS export
-                        ExportAsDds(ddsBytes, name, outputDir);
                         return;
-                    }
                     throw;
                 }
 
@@ -191,7 +192,7 @@ namespace DSAnimStudio.Export
                         // Pfim returns RGBA, System.Drawing needs BGRA
                         SwapRedBlue32(pixelData, image.Width, image.Height, image.Stride);
                         break;
-                    case PfimImageFormat.Rgb24:
+                    case var _ when IsRgb24CompatibleFormat(image.Format):
                         pixelFormat = PixelFormat.Format24bppRgb;
                         SwapRedBlue24(pixelData, image.Width, image.Height, image.Stride);
                         break;
@@ -205,26 +206,48 @@ namespace DSAnimStudio.Export
                         pixelFormat = PixelFormat.Format16bppRgb565;
                         break;
                     default:
-                        // Unsupported pixel format, fall back to DDS
-                        _warnings.Add($"Warning: Unsupported pixel format '{image.Format}' for '{name}', saving as DDS.");
-                        ExportAsDds(ddsBytes, name, outputDir);
-                        return;
+                        _warnings.Add($"Unsupported pixel format '{image.Format}' for '{name}'.");
+                        if (_options.SkipUnsupported)
+                            return;
+                        throw new NotSupportedException($"Unsupported pixel format '{image.Format}' for '{name}'.");
                 }
 
-                // Create bitmap and save as PNG
-                var handle = GCHandle.Alloc(pixelData, GCHandleType.Pinned);
-                try
-                {
-                    var bmp = new Bitmap(image.Width, image.Height, image.Stride, pixelFormat,
-                        handle.AddrOfPinnedObject());
+                using var bmp = CreateBitmap(image.Width, image.Height, pixelFormat, pixelData, image.Stride);
+                string outPath = Path.Combine(outputDir, $"{name}.png");
+                bmp.Save(outPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+        }
 
-                    string outPath = Path.Combine(outputDir, $"{name}.png");
-                    bmp.Save(outPath, System.Drawing.Imaging.ImageFormat.Png);
-                }
-                finally
+        private static Bitmap CreateBitmap(int width, int height, PixelFormat pixelFormat, byte[] pixelData, int sourceStride)
+        {
+            var bitmap = new Bitmap(width, height, pixelFormat);
+            var rect = new Rectangle(0, 0, width, height);
+            BitmapData bitmapData = null;
+
+            try
+            {
+                bitmapData = bitmap.LockBits(rect, ImageLockMode.WriteOnly, pixelFormat);
+                int srcStride = Math.Abs(sourceStride);
+                int dstStride = Math.Abs(bitmapData.Stride);
+                int rowCopyLength = Math.Min(srcStride, dstStride);
+
+                for (int y = 0; y < height; y++)
                 {
-                    handle.Free();
+                    IntPtr destination = IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride);
+                    Marshal.Copy(pixelData, y * srcStride, destination, rowCopyLength);
                 }
+
+                return bitmap;
+            }
+            catch
+            {
+                bitmap.Dispose();
+                throw;
+            }
+            finally
+            {
+                if (bitmapData != null)
+                    bitmap.UnlockBits(bitmapData);
             }
         }
 

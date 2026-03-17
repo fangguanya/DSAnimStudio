@@ -279,9 +279,6 @@
   </action>
   <action id="67" name="AddSpEffect">
     <s32 name="SpEffectID" />
-    <s32 assert="0" />
-    <s32 assert="0" />
-    <s32 assert="0" />
   </action>
   <action id="95" name="SpawnOneShotFFX_Ember">
     <s32 name="FFXID" />

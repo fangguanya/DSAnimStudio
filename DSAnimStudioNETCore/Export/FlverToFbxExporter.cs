@@ -5,14 +5,14 @@ using System.Linq;
 using Assimp;
 using Newtonsoft.Json.Linq;
 using SoulsFormats;
-using SoulsAssetPipeline.Animation;
+using HKX = SoulsAssetPipeline.Animation.HKX;
 using Matrix4x4 = System.Numerics.Matrix4x4;
 using Vector3 = System.Numerics.Vector3;
 
 namespace DSAnimStudio.Export
 {
     /// <summary>
-    /// Exports FLVER2 models to FBX format using AssimpNet.
+    /// Exports FLVER2 models to glTF 2.0 format using AssimpNet.
     /// Handles mesh, skeleton, bone weights, materials, and UV data.
     /// </summary>
     public class FlverToFbxExporter
@@ -24,8 +24,8 @@ namespace DSAnimStudio.Export
             /// <summary>Scale factor applied to all positions (default 1.0)</summary>
             public float ScaleFactor { get; set; } = 1.0f;
 
-            /// <summary>Export format ID for Assimp (default "fbx" for UE5 compatibility; collada fallback if FBX fails)</summary>
-            public string ExportFormatId { get; set; } = "fbx";
+            /// <summary>Export format ID for Assimp (formal export uses glTF 2.0).</summary>
+            public string ExportFormatId { get; set; } = "gltf2";
         }
 
         private readonly ExportOptions _options;
@@ -46,7 +46,7 @@ namespace DSAnimStudio.Export
         }
 
         /// <summary>
-        /// Export a FLVER2 model to FBX file.
+        /// Export a FLVER2 model to glTF 2.0.
         /// </summary>
         public void Export(FLVER2 flver, string outputPath)
         {
@@ -144,38 +144,13 @@ namespace DSAnimStudio.Export
                         Console.WriteLine("        WARNING: face indices out of range!");
                 }
 
-                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2" };
-                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb" };
-                bool exported = false;
-                string exportedPath = null;
+                string exportedPath = Path.ChangeExtension(outputPath, ".gltf");
+                bool result = ctx.ExportFile(scene, exportedPath, _options.ExportFormatId);
+                Console.WriteLine($"    Export format '{_options.ExportFormatId}': {(result ? "SUCCESS" : "FAILED")} -> {exportedPath}");
+                if (!result)
+                    throw new Exception("Formal model export failed for glTF 2.0.");
 
-                for (int i = 0; i < formatsToTry.Length; i++)
-                {
-                    string fmt = formatsToTry[i];
-                    string tryPath = Path.ChangeExtension(outputPath, extensions[i]);
-
-                    try
-                    {
-                        bool result = ctx.ExportFile(scene, tryPath, fmt);
-                        Console.WriteLine($"    Export format '{fmt}': {(result ? "SUCCESS" : "FAILED")} -> {tryPath}");
-                        if (result)
-                        {
-                            exported = true;
-                            exportedPath = tryPath;
-                            break;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"    Export format '{fmt}': EXCEPTION -> {ex.Message}");
-                    }
-                }
-
-                if (!exported)
-                    throw new Exception("All formal export formats failed (fbx, fbxa, gltf2, glb2)");
-
-                if (exportedPath != null && exportedPath.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase))
-                    PostProcessGltf(exportedPath);
+                PostProcessGltf(exportedPath);
             }
         }
 

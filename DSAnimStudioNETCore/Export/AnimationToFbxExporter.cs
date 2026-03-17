@@ -12,7 +12,7 @@ using Quaternion = System.Numerics.Quaternion;
 namespace DSAnimStudio.Export
 {
     /// <summary>
-    /// Exports HKX animations to FBX format.
+    /// Exports HKX animations to glTF 2.0.
     /// Supports SplineCompressed and InterleavedUncompressed animation types.
     /// Handles root motion baking from HKADefaultAnimatedReferenceFrame.
     /// </summary>
@@ -29,8 +29,8 @@ namespace DSAnimStudio.Export
             /// <summary>If true, bake root motion into root bone keyframes</summary>
             public bool BakeRootMotion { get; set; } = true;
 
-            /// <summary>Export format ID for Assimp (default "fbx" for UE5 compatibility; collada fallback if FBX fails)</summary>
-            public string ExportFormatId { get; set; } = "fbx";
+            /// <summary>Export format ID for Assimp (formal export uses glTF 2.0).</summary>
+            public string ExportFormatId { get; set; } = "gltf2";
         }
 
         private readonly ExportOptions _options;
@@ -51,12 +51,12 @@ namespace DSAnimStudio.Export
         }
 
         /// <summary>
-        /// Export an animation with its skeleton to a standalone FBX file.
+        /// Export an animation with its skeleton to a standalone glTF 2.0 file.
         /// </summary>
         /// <param name="skeletonHkx">The HKX skeleton data</param>
         /// <param name="animData">The parsed HavokAnimationData</param>
         /// <param name="animName">Name for the animation clip</param>
-        /// <param name="outputPath">Output FBX file path</param>
+        /// <param name="outputPath">Output glTF file path</param>
         public void Export(HKX skeletonHkx, HavokAnimationData animData, string animName, string outputPath,
             IReadOnlyList<FLVER2> sceneFlvers)
         {
@@ -133,36 +133,13 @@ namespace DSAnimStudio.Export
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                // Try formal formats in order: FBX → glTF2 → GLB
-                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2" };
-                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb" };
-                bool success = false;
-                string exportedPath = null;
-                for (int i = 0; i < formatsToTry.Length; i++)
-                {
-                    string fmt = formatsToTry[i];
-                    string tryPath = Path.ChangeExtension(outputPath, extensions[i]);
-                    try
-                    {
-                        success = ctx.ExportFile(scene, tryPath, fmt);
-                        Console.WriteLine($"    Animation export format '{fmt}': {(success ? "SUCCESS" : "FAILED")} -> {tryPath}");
-                        if (success)
-                        {
-                            exportedPath = tryPath;
-                            // Post-process: fix absolute buffer URIs in glTF files
-                            if (tryPath.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase))
-                                FixGltfBufferUris(tryPath);
-                            break;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"    Animation export format '{fmt}': EXCEPTION -> {ex.Message}");
-                    }
-                }
-
+                string exportedPath = Path.ChangeExtension(outputPath, ".gltf");
+                bool success = ctx.ExportFile(scene, exportedPath, _options.ExportFormatId);
+                Console.WriteLine($"    Animation export format '{_options.ExportFormatId}': {(success ? "SUCCESS" : "FAILED")} -> {exportedPath}");
                 if (!success)
-                    throw new Exception($"All formal animation export formats failed for '{animName}' (fbx, fbxa, gltf2, glb2)");
+                    throw new Exception($"Formal animation export failed for '{animName}' using glTF 2.0.");
+
+                FixGltfBufferUris(exportedPath);
 
                 if (exportedPath != null)
                     Console.WriteLine($"    Animation exported: {Path.GetFileName(exportedPath)}");
@@ -221,49 +198,29 @@ namespace DSAnimStudio.Export
 
             int total = animFiles.Count;
             int current = 0;
-            int exported = 0;
-
             foreach (var file in animFiles)
             {
                 current++;
                 var name = Path.GetFileNameWithoutExtension(file.Name ?? $"anim_{file.ID}");
 
-                try
-                {
-                    progressCallback?.Invoke(name, current, total);
+                progressCallback?.Invoke(name, current, total);
 
-                    // Decompress if needed
-                    byte[] hkxBytes = file.Bytes;
-                    if (DCX.Is(hkxBytes)) hkxBytes = DCX.Decompress(hkxBytes);
+                byte[] hkxBytes = file.Bytes;
+                if (DCX.Is(hkxBytes)) hkxBytes = DCX.Decompress(hkxBytes);
 
-                    // Parse the animation HKX (pass compendium for Sekiro tagfile format)
-                    HavokAnimationData animData = ReadAnimData(hkxBytes, skeletonHkx, compendium);
-                    if (animData == null) continue;
+                HavokAnimationData animData = ReadAnimData(hkxBytes, skeletonHkx, compendium);
+                if (animData == null)
+                    throw new InvalidOperationException($"Formal animation parse returned no data for '{name}'.");
 
-                    // Format output filename
-                    string cleanName = Path.GetFileNameWithoutExtension(name);
-                    // Remove .hkx from double extensions like "a000_003000.hkx"
-                    if (cleanName.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase))
-                        cleanName = cleanName.Substring(0, cleanName.Length - 4);
-                    string outPath = Path.Combine(outputDir, $"{cleanName}.fbx");
+                string cleanName = Path.GetFileNameWithoutExtension(name);
+                if (cleanName.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase))
+                    cleanName = cleanName.Substring(0, cleanName.Length - 4);
+                string outPath = Path.Combine(outputDir, $"{cleanName}.gltf");
 
-                    Export(skeletonHkx, animData, cleanName, outPath, sceneFlvers);
-                    exported++;
-                }
-                catch (Exception ex)
-                {
-                    if (_debugLogCount < 5)
-                    {
-                        Console.Error.WriteLine($"    [DEBUG] Export failed for '{name}': {ex.Message}");
-                        if (ex.InnerException != null)
-                            Console.Error.WriteLine($"    [DEBUG]   Inner: {ex.InnerException.Message}");
-                        _debugLogCount++;
-                    }
-                    continue;
-                }
+                Export(skeletonHkx, animData, cleanName, outPath, sceneFlvers);
             }
 
-            progressCallback?.Invoke("done", exported, total);
+            progressCallback?.Invoke("done", total, total);
         }
 
         private static string NormalizeAnimationName(string name)
@@ -283,48 +240,21 @@ namespace DSAnimStudio.Export
         private HavokAnimationData ReadAnimData(byte[] hkxBytes, HKX skeletonHkx, byte[] compendium = null)
         {
             HKX hkx = null;
-            string parseMethod = "none";
+            string parseMethod = compendium != null ? "tagfile+compendium" : "tagfile";
 
             try
             {
-                hkx = HKX.GenFakeFromTagFile(hkxBytes, compendium);
-                parseMethod = "tagfile+compendium";
+                hkx = compendium != null
+                    ? HKX.GenFakeFromTagFile(hkxBytes, compendium)
+                    : HKX.GenFakeFromTagFile(hkxBytes);
             }
-            catch
+            catch (Exception ex)
             {
-                try
-                {
-                    hkx = HKX.GenFakeFromTagFile(hkxBytes);
-                    parseMethod = "tagfile";
-                }
-                catch
-                {
-                    try
-                    {
-                        hkx = HKX.Read(hkxBytes, HKX.HKXVariation.HKXDS1, isDS1RAnimHotfix: true);
-                        parseMethod = "HKXDS1";
-                    }
-                    catch
-                    {
-                        if (_debugLogCount < 3)
-                        {
-                            Console.Error.WriteLine($"    [DEBUG] All HKX parse methods failed for anim ({hkxBytes.Length} bytes)");
-                            _debugLogCount++;
-                        }
-                        return null;
-                    }
-                }
+                throw new InvalidOperationException($"Formal animation HKX parsing failed via {parseMethod}: {ex.Message}", ex);
             }
 
             if (hkx?.DataSection?.Objects == null)
-            {
-                if (_debugLogCount < 3)
-                {
-                    Console.Error.WriteLine($"    [DEBUG] HKX parsed via {parseMethod} but DataSection.Objects is null");
-                    _debugLogCount++;
-                }
-                return null;
-            }
+                throw new InvalidOperationException($"Formal animation HKX parsing produced no DataSection objects via {parseMethod}.");
 
             HKX.HKASkeleton exportSkeleton = null;
             if (skeletonHkx?.DataSection?.Objects != null)
@@ -369,17 +299,17 @@ namespace DSAnimStudio.Export
             if (exportSkeleton != null && binding != null)
             {
                 if (splineAnimation != null)
-                    return new HavokAnimationData_SplineCompressed(0, "", exportSkeleton, referenceFrame, binding, splineAnimation);
+                    return new HavokAnimationData_SplineCompressed(0L, string.Empty, exportSkeleton, referenceFrame, binding, splineAnimation);
 
                 if (interleavedAnimation != null)
-                    return new HavokAnimationData_InterleavedUncompressed(0, "", exportSkeleton, referenceFrame, binding, interleavedAnimation);
+                    return new HavokAnimationData_InterleavedUncompressed(0L, string.Empty, exportSkeleton, referenceFrame, binding, interleavedAnimation);
             }
 
             if (splineAnimation != null)
-                return new HavokAnimationData_SplineCompressed(0, "", splineAnimation);
+                return new HavokAnimationData_SplineCompressed(0L, string.Empty, splineAnimation);
 
             if (interleavedAnimation != null)
-                return new HavokAnimationData_InterleavedUncompressed(0, "", interleavedAnimation);
+                return new HavokAnimationData_InterleavedUncompressed(0L, string.Empty, interleavedAnimation);
 
             return null;
         }
@@ -436,7 +366,7 @@ namespace DSAnimStudio.Export
                     if (assimpMesh.MaterialIndex < 0)
                     {
                         scene.Materials.Add(material);
-                        assimpMesh.MaterialIndex = scene.Materials.Count - 1;
+                        assimpMesh.MaterialIndex = (int)scene.Materials.Count - 1;
                     }
 
                     scene.Meshes.Add(assimpMesh);
@@ -719,7 +649,7 @@ namespace DSAnimStudio.Export
             float scale = _options.ScaleFactor;
 
             // Create a channel for each bone
-            for (int boneIdx = 0; boneIdx < skeleton.Bones.Size; boneIdx++)
+            for (int boneIdx = 0; boneIdx < (int)skeleton.Bones.Size; boneIdx++)
             {
                 var boneName = skeleton.Bones[boneIdx].Name.GetString();
                 if (string.IsNullOrEmpty(boneName)) boneName = $"Bone_{boneIdx}";
@@ -775,12 +705,9 @@ namespace DSAnimStudio.Export
                         channel.ScalingKeys.Add(new VectorKey(time, new Vector3D(
                             gltfScale.X, gltfScale.Y, gltfScale.Z)));
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // If frame sampling fails, use identity
-                        channel.PositionKeys.Add(new VectorKey(time, new Vector3D(0, 0, 0)));
-                        channel.RotationKeys.Add(new QuaternionKey(time, new Assimp.Quaternion(1, 0, 0, 0)));
-                        channel.ScalingKeys.Add(new VectorKey(time, new Vector3D(1, 1, 1)));
+                        throw new InvalidOperationException($"Failed to sample bone '{boneName}' at frame {frame} for animation '{animName}'.", ex);
                     }
                 }
 

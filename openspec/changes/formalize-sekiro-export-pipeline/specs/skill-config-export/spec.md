@@ -7,6 +7,13 @@
 - **当** 用户正式导出角色技能配置
 - **那么** 输出文件必须满足正式 schema，并可被 UE 侧按同一合同导入
 
+### 需求:技能动画元数据必须可追溯到共享求解结果
+正式技能配置中的动画相关字段必须直接复用 formal animation resolution 的结果，至少区分 request TAE、resolved TAE、resolved HKX、source anim file 和 deliverable anim file。
+
+#### 场景:技能条目引用其他动画
+- **当** 一个技能条目的事件语义依赖的动画并不等于原始请求的 TAE 条目
+- **那么** 正式技能配置必须保留完整求解链，而不是只写一个动画名
+
 ## MODIFIED Requirements
 
 ### 需求:缺模板或缺字段定义时必须显式失败

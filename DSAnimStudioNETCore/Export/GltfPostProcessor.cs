@@ -13,99 +13,154 @@ namespace DSAnimStudio.Export
     {
         public static void PostProcess(string gltfPath, string animationName = null)
         {
-            try
+            string json = File.ReadAllText(gltfPath);
+            var root = JObject.Parse(json);
+            bool modified = false;
+            bool binModified = false;
+
+            var buffers = root["buffers"] as JArray;
+            if (buffers != null)
             {
-                string json = File.ReadAllText(gltfPath);
-                var root = JObject.Parse(json);
-                bool modified = false;
-                bool binModified = false;
-
-                var buffers = root["buffers"] as JArray;
-                if (buffers != null)
+                foreach (var bufferToken in buffers.OfType<JObject>())
                 {
-                    foreach (var bufferToken in buffers.OfType<JObject>())
+                    var uri = (string)bufferToken["uri"];
+                    if (!string.IsNullOrEmpty(uri) && Path.IsPathRooted(uri))
                     {
-                        var uri = (string)bufferToken["uri"];
-                        if (!string.IsNullOrEmpty(uri) && Path.IsPathRooted(uri))
-                        {
-                            bufferToken["uri"] = Path.GetFileName(uri.Replace('\\', '/'));
-                            modified = true;
-                        }
+                        bufferToken["uri"] = Path.GetFileName(uri.Replace('\\', '/'));
+                        modified = true;
                     }
                 }
+            }
 
-                byte[] binBytes = null;
-                List<byte> binData = null;
-                string binPath = null;
-                if (buffers != null && buffers.Count > 0)
+            byte[] binBytes = null;
+            List<byte> binData = null;
+            string binPath = null;
+            if (buffers != null && buffers.Count > 0)
+            {
+                string binUri = (string)buffers[0]?["uri"];
+                if (!string.IsNullOrEmpty(binUri))
                 {
-                    string binUri = (string)buffers[0]?["uri"];
-                    if (!string.IsNullOrEmpty(binUri))
+                    binPath = Path.Combine(Path.GetDirectoryName(gltfPath) ?? string.Empty, binUri);
+                    if (File.Exists(binPath))
                     {
-                        binPath = Path.Combine(Path.GetDirectoryName(gltfPath) ?? string.Empty, binUri);
-                        if (File.Exists(binPath))
-                        {
-                            binBytes = File.ReadAllBytes(binPath);
-                            binData = binBytes.ToList();
-                        }
+                        binBytes = File.ReadAllBytes(binPath);
+                        binData = binBytes.ToList();
                     }
                 }
+            }
 
-                var accessors = root["accessors"] as JArray;
-                var bufferViews = root["bufferViews"] as JArray;
-                var nodes = root["nodes"] as JArray;
-                var skins = root["skins"] as JArray;
-                var scenes = root["scenes"] as JArray;
-                var animations = root["animations"] as JArray;
+            var accessors = root["accessors"] as JArray;
+            var bufferViews = root["bufferViews"] as JArray;
+            var nodes = root["nodes"] as JArray;
+            var skins = root["skins"] as JArray;
+            var scenes = root["scenes"] as JArray;
+            var animations = root["animations"] as JArray;
 
-                if (binData != null)
+            if (binData != null)
+            {
+                foreach (int accessorIndex in CollectJointAccessorIndices(root))
                 {
-                    foreach (int accessorIndex in CollectJointAccessorIndices(root))
-                    {
-                        if (ConvertJointAccessorToUnsignedShort(accessorIndex, accessors, bufferViews, binBytes, binData))
-                        {
-                            modified = true;
-                            binModified = true;
-                        }
-                    }
-                }
-
-                if (nodes != null && skins != null && accessors != null && bufferViews != null && binData != null)
-                {
-                    if (NormalizeSkinHierarchy(nodes, skins, accessors, bufferViews, binBytes, binData))
+                    if (ConvertJointAccessorToUnsignedShort(accessorIndex, accessors, bufferViews, binBytes, binData))
                     {
                         modified = true;
                         binModified = true;
                     }
                 }
-
-                if (animations != null && animations.Count > 0)
-                {
-                    if (ConvertAnimatedNodesToTrs(nodes, animations))
-                        modified = true;
-
-                    if (MergeAnimations(root, animationName))
-                        modified = true;
-                }
-
-                if (nodes != null && scenes != null && scenes.Count > 0)
-                {
-                    if (NormalizeSceneMeshRoots(nodes, scenes))
-                        modified = true;
-                }
-
-                if (binModified && buffers != null && buffers.Count > 0 && binPath != null)
-                {
-                    buffers[0]["byteLength"] = binData.Count;
-                    File.WriteAllBytes(binPath, binData.ToArray());
-                }
-
-                if (modified)
-                    File.WriteAllText(gltfPath, root.ToString());
             }
-            catch (Exception ex)
+
+            if (nodes != null && skins != null && accessors != null && bufferViews != null && binData != null)
             {
-                Console.WriteLine($"    Warning: failed to post-process glTF: {ex.Message}");
+                if (NormalizeSkinHierarchy(nodes, skins, accessors, bufferViews, binBytes, binData))
+                {
+                    modified = true;
+                    binModified = true;
+                }
+            }
+
+            if (animations != null && animations.Count > 0)
+            {
+                if (ConvertAnimatedNodesToTrs(nodes, animations))
+                    modified = true;
+
+                if (MergeAnimations(root, animationName))
+                    modified = true;
+            }
+
+            if (nodes != null && scenes != null && scenes.Count > 0)
+            {
+                if (NormalizeSceneMeshRoots(nodes, scenes))
+                    modified = true;
+            }
+
+            if (binModified && buffers != null && buffers.Count > 0 && binPath != null)
+            {
+                buffers[0]["byteLength"] = binData.Count;
+                File.WriteAllBytes(binPath, binData.ToArray());
+            }
+
+            ValidateProcessedGltf(root, gltfPath);
+
+            if (modified)
+                File.WriteAllText(gltfPath, root.ToString());
+        }
+
+        private static void ValidateProcessedGltf(JObject root, string gltfPath)
+        {
+            var buffers = root["buffers"] as JArray;
+            if (buffers != null)
+            {
+                foreach (var bufferToken in buffers.OfType<JObject>())
+                {
+                    var uri = (string)bufferToken["uri"];
+                    if (!string.IsNullOrEmpty(uri) && Path.IsPathRooted(uri))
+                        throw new InvalidOperationException($"glTF buffer URI remained absolute after post-process: {gltfPath}");
+                }
+            }
+
+            var accessors = root["accessors"] as JArray;
+            var skins = root["skins"] as JArray;
+            if (skins != null)
+            {
+                foreach (var skinObj in skins.OfType<JObject>())
+                {
+                    int skeletonIndex = (int?)skinObj["skeleton"] ?? -1;
+                    if (skeletonIndex < 0)
+                        throw new InvalidOperationException("glTF skin is missing a formal skeleton root.");
+
+                    var joints = skinObj["joints"] as JArray;
+                    if (joints == null || joints.Count == 0)
+                        throw new InvalidOperationException("glTF skin has no joints after post-process.");
+
+                    int accessorIndex = (int?)skinObj["inverseBindMatrices"] ?? -1;
+                    if (accessors == null || accessorIndex < 0 || accessorIndex >= accessors.Count)
+                        throw new InvalidOperationException("glTF skin is missing inverse bind matrices.");
+
+                    var accessor = accessors[accessorIndex] as JObject;
+                    int accessorCount = (int?)accessor?["count"] ?? 0;
+                    if (accessorCount != joints.Count)
+                        throw new InvalidOperationException($"glTF inverse bind matrix count {accessorCount} did not match joint count {joints.Count}.");
+                }
+            }
+
+            var animations = root["animations"] as JArray;
+            if (animations != null && animations.Count > 0)
+            {
+                if (animations.Count != 1)
+                    throw new InvalidOperationException($"Formal animation glTF must contain exactly one animation entry, found {animations.Count}.");
+
+                var nodes = root["nodes"] as JArray;
+                var channels = animations[0]?["channels"] as JArray;
+                if (channels == null || channels.Count == 0)
+                    throw new InvalidOperationException("Formal animation glTF contains no channels.");
+
+                foreach (var channelObj in channels.OfType<JObject>())
+                {
+                    int nodeIndex = (int?)channelObj["target"]?["node"] ?? -1;
+                    if (nodes == null || nodeIndex < 0 || nodeIndex >= nodes.Count)
+                        throw new InvalidOperationException("Formal animation glTF references an invalid node.");
+                    if (nodes[nodeIndex]?["matrix"] != null)
+                        throw new InvalidOperationException($"Animated node {nodeIndex} still contains a matrix transform after post-process.");
+                }
             }
         }
 
