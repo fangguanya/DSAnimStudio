@@ -19,18 +19,24 @@ namespace DSAnimStudio.Export
 
         public static readonly Matrix4x4 GltfToSourceBasis = Matrix4x4.Transpose(SourceToGltfBasis);
 
-        public static readonly Matrix4x4 PostTransformCorrectionGltf = Matrix4x4.CreateRotationX(-MathF.PI / 2);
+        public static readonly Matrix4x4 PostTransformCorrectionGltf =
+            Matrix4x4.CreateRotationX(MathF.PI / 2)
+            * Matrix4x4.CreateRotationY(MathF.PI / 2);
+
+        public static readonly Matrix4x4 SourceToGltfTransform = SourceToGltfBasis * PostTransformCorrectionGltf;
+
+        public static readonly Matrix4x4 GltfToSourceTransform = Matrix4x4.Transpose(SourceToGltfTransform);
 
         public static readonly Matrix4x4 RootNodeCorrectionGltf = Matrix4x4.Identity;
 
         public static Vector3 ConvertSourceVectorToGltf(Vector3 value)
         {
-            return Vector3.Transform(value, SourceToGltfBasis * PostTransformCorrectionGltf);
+            return Vector3.Transform(value, SourceToGltfTransform);
         }
 
         public static Matrix4x4 ConvertSourceMatrixToGltf(Matrix4x4 value)
         {
-            return (GltfToSourceBasis * value * SourceToGltfBasis) * PostTransformCorrectionGltf;
+            return GltfToSourceTransform * value * SourceToGltfTransform;
         }
 
         public static Matrix4x4 CreateLocalMatrix(Vector3 translation, Quaternion rotation, Vector3 scale)
@@ -148,7 +154,7 @@ namespace DSAnimStudio.Export
             return parentMap;
         }
 
-        private static Matrix4x4 ToNumericsMatrix(Assimp.Matrix4x4 value)
+        public static Matrix4x4 ToNumericsMatrix(Assimp.Matrix4x4 value)
         {
             return new Matrix4x4(
                 value.A1, value.B1, value.C1, value.D1,

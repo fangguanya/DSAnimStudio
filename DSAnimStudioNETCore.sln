@@ -15,6 +15,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SoulsFormats", "SoulsAssetP
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SekiroExporter", "SekiroExporter\SekiroExporter.csproj", "{554F8C16-AE40-43B1-B3D6-26B41823DA02}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DSAnimStudioNETCore.Tests", "DSAnimStudioNETCore.Tests\DSAnimStudioNETCore.Tests.csproj", "{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}"
+EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "SoulsAssetPipelineFolder", "SoulsAssetPipelineFolder", "{2893AB62-B3CC-2DA5-D781-A6C37C671BC5}"
 EndProject
 Global
@@ -99,6 +101,18 @@ Global
 		{554F8C16-AE40-43B1-B3D6-26B41823DA02}.Release|x64.Build.0 = Release|Any CPU
 		{554F8C16-AE40-43B1-B3D6-26B41823DA02}.Release|x86.ActiveCfg = Release|Any CPU
 		{554F8C16-AE40-43B1-B3D6-26B41823DA02}.Release|x86.Build.0 = Release|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Debug|x64.Build.0 = Debug|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Debug|x86.Build.0 = Debug|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Release|x64.ActiveCfg = Release|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Release|x64.Build.0 = Release|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Release|x86.ActiveCfg = Release|Any CPU
+		{AB2F1234-0E2A-4D7D-9B34-1F4F0BB2C6DD}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

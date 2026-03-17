@@ -12,8 +12,8 @@ using Vector3 = System.Numerics.Vector3;
 namespace DSAnimStudio.Export
 {
     /// <summary>
-    /// Exports FLVER2 models to glTF 2.0 format using AssimpNet.
-    /// Handles mesh, skeleton, bone weights, materials, and UV data.
+    /// Exports FLVER2 models to glTF 2.0.
+    /// Assimp remains the in-memory scene builder, while glTF JSON/bin emission is handled by the custom writer.
     /// </summary>
     public class FlverToFbxExporter
     {
@@ -24,7 +24,7 @@ namespace DSAnimStudio.Export
             /// <summary>Scale factor applied to all positions (default 1.0)</summary>
             public float ScaleFactor { get; set; } = 1.0f;
 
-            /// <summary>Export format ID for Assimp (formal export uses glTF 2.0).</summary>
+            /// <summary>Retained for compatibility with older callers. Formal export always writes glTF 2.0 directly.</summary>
             public string ExportFormatId { get; set; } = "gltf2";
         }
 
@@ -116,51 +116,36 @@ namespace DSAnimStudio.Export
                 scene.Materials.Add(new Material { Name = "DefaultMaterial" });
             }
 
-            using (var ctx = new AssimpContext())
+            var dir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            Console.WriteLine($"    Export scene: {scene.Meshes.Count} meshes, {scene.Materials.Count} materials, {scene.RootNode?.Children?.Count} children");
+            foreach (var mesh in scene.Meshes)
             {
-                var dir = Path.GetDirectoryName(outputPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                Console.WriteLine($"    Assimp scene: {scene.Meshes.Count} meshes, {scene.Materials.Count} materials, {scene.RootNode?.Children?.Count} children");
-                foreach (var mesh in scene.Meshes)
+                Console.WriteLine($"      {mesh.Name}: {mesh.VertexCount} verts, {mesh.FaceCount} faces, {mesh.BoneCount} bones, hasNormals={mesh.HasNormals}, hasTangents={mesh.HasTangentBasis}");
+                if (mesh.VertexCount > 0)
                 {
-                    Console.WriteLine($"      {mesh.Name}: {mesh.VertexCount} verts, {mesh.FaceCount} faces, {mesh.BoneCount} bones, hasNormals={mesh.HasNormals}, hasTangents={mesh.HasTangentBasis}");
-                    if (mesh.VertexCount > 0)
+                    bool hasNaN = mesh.Vertices.Any(v => float.IsNaN(v.X) || float.IsNaN(v.Y) || float.IsNaN(v.Z));
+                    if (hasNaN)
+                        Console.WriteLine("        WARNING: has NaN vertices!");
+
+                    if (mesh.HasNormals)
                     {
-                        bool hasNaN = mesh.Vertices.Any(v => float.IsNaN(v.X) || float.IsNaN(v.Y) || float.IsNaN(v.Z));
-                        if (hasNaN)
-                            Console.WriteLine("        WARNING: has NaN vertices!");
-
-                        if (mesh.HasNormals)
-                        {
-                            bool normalsHaveNaN = mesh.Normals.Any(v => float.IsNaN(v.X) || float.IsNaN(v.Y) || float.IsNaN(v.Z));
-                            if (normalsHaveNaN)
-                                Console.WriteLine("        WARNING: has NaN normals!");
-                        }
+                        bool normalsHaveNaN = mesh.Normals.Any(v => float.IsNaN(v.X) || float.IsNaN(v.Y) || float.IsNaN(v.Z));
+                        if (normalsHaveNaN)
+                            Console.WriteLine("        WARNING: has NaN normals!");
                     }
-
-                    bool faceOOR = mesh.Faces.Any(f => f.Indices.Any(idx => idx < 0 || idx >= mesh.VertexCount));
-                    if (faceOOR)
-                        Console.WriteLine("        WARNING: face indices out of range!");
                 }
 
-                string exportedPath = Path.ChangeExtension(outputPath, ".gltf");
-                bool result = ctx.ExportFile(scene, exportedPath, _options.ExportFormatId);
-                Console.WriteLine($"    Export format '{_options.ExportFormatId}': {(result ? "SUCCESS" : "FAILED")} -> {exportedPath}");
-                if (!result)
-                    throw new Exception("Formal model export failed for glTF 2.0.");
-
-                PostProcessGltf(exportedPath, formalSkeletonRootName);
+                bool faceOOR = mesh.Faces.Any(f => f.Indices.Any(idx => idx < 0 || idx >= mesh.VertexCount));
+                if (faceOOR)
+                    Console.WriteLine("        WARNING: face indices out of range!");
             }
-        }
 
-        /// <summary>
-        /// Normalize writer-side glTF output so the formal contract can be validated deterministically.
-        /// </summary>
-        private static void PostProcessGltf(string gltfPath, string formalSkeletonRootName)
-        {
-            GltfWriterPostProcessor.PostProcess(gltfPath, formalSkeletonRootName);
+            string exportedPath = Path.ChangeExtension(outputPath, ".gltf");
+            GltfSceneWriter.Write(scene, exportedPath, formalSkeletonRootName);
+            Console.WriteLine($"    Export format 'gltf2': SUCCESS -> {exportedPath}");
         }
 
         private static string ResolveFormalSkeletonRootName(IReadOnlyList<Node> boneNodes, Node sceneRoot)

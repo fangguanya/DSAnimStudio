@@ -13,6 +13,7 @@ namespace DSAnimStudio.Export
 {
     /// <summary>
     /// Exports HKX animations to glTF 2.0.
+    /// Assimp remains the in-memory scene builder, while glTF JSON/bin emission is handled by the custom writer.
     /// Supports SplineCompressed and InterleavedUncompressed animation types.
     /// Handles root motion baking from HKADefaultAnimatedReferenceFrame.
     /// </summary>
@@ -29,7 +30,7 @@ namespace DSAnimStudio.Export
             /// <summary>If true, bake root motion into root bone keyframes</summary>
             public bool BakeRootMotion { get; set; } = true;
 
-            /// <summary>Export format ID for Assimp (formal export uses glTF 2.0).</summary>
+            /// <summary>Retained for compatibility with older callers. Formal export always writes glTF 2.0 directly.</summary>
             public string ExportFormatId { get; set; } = "gltf2";
         }
 
@@ -127,33 +128,14 @@ namespace DSAnimStudio.Export
             if (scene.Materials.Count == 0)
                 scene.Materials.Add(new Material { Name = "DefaultMaterial" });
 
-            // Export
-            using (var ctx = new AssimpContext())
-            {
-                var dir = Path.GetDirectoryName(outputPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
+            var dir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
 
-                string exportedPath = Path.ChangeExtension(outputPath, ".gltf");
-                bool success = ctx.ExportFile(scene, exportedPath, _options.ExportFormatId);
-                Console.WriteLine($"    Animation export format '{_options.ExportFormatId}': {(success ? "SUCCESS" : "FAILED")} -> {exportedPath}");
-                if (!success)
-                    throw new Exception($"Formal animation export failed for '{animName}' using glTF 2.0.");
-
-                FixGltfBufferUris(exportedPath, formalSkeletonRootName);
-
-                if (exportedPath != null)
-                    Console.WriteLine($"    Animation exported: {Path.GetFileName(exportedPath)}");
-            }
-        }
-
-        /// <summary>
-        /// Fix Assimp's glTF2 exporter writing absolute paths for buffer URIs.
-        /// </summary>
-        private static void FixGltfBufferUris(string gltfPath, string formalSkeletonRootName)
-        {
-            string animationName = Path.GetFileNameWithoutExtension(gltfPath);
-            GltfWriterPostProcessor.PostProcess(gltfPath, formalSkeletonRootName, animationName);
+            string exportedPath = Path.ChangeExtension(outputPath, ".gltf");
+            GltfSceneWriter.Write(scene, exportedPath, formalSkeletonRootName, animName);
+            Console.WriteLine($"    Animation export format 'gltf2': SUCCESS -> {exportedPath}");
+            Console.WriteLine($"    Animation exported: {Path.GetFileName(exportedPath)}");
         }
 
         private static string ResolveFormalSkeletonRootName(IReadOnlyList<Node> boneNodes, Node sceneRoot)
