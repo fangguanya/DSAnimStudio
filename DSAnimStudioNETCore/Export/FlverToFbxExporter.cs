@@ -144,8 +144,8 @@ namespace DSAnimStudio.Export
                         Console.WriteLine("        WARNING: face indices out of range!");
                 }
 
-                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2", "collada" };
-                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb", ".dae" };
+                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2" };
+                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb" };
                 bool exported = false;
                 string exportedPath = null;
 
@@ -172,7 +172,7 @@ namespace DSAnimStudio.Export
                 }
 
                 if (!exported)
-                    throw new Exception("All export formats failed (fbx, fbxa, gltf2, glb2, collada)");
+                    throw new Exception("All formal export formats failed (fbx, fbxa, gltf2, glb2)");
 
                 if (exportedPath != null && exportedPath.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase))
                     PostProcessGltf(exportedPath);

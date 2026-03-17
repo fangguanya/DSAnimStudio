@@ -133,9 +133,9 @@ namespace DSAnimStudio.Export
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                // Try formats in order: FBX → glTF2 → Collada (fallback)
-                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2", "collada" };
-                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb", ".dae" };
+                // Try formal formats in order: FBX → glTF2 → GLB
+                string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2" };
+                string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb" };
                 bool success = false;
                 string exportedPath = null;
                 for (int i = 0; i < formatsToTry.Length; i++)
@@ -162,7 +162,7 @@ namespace DSAnimStudio.Export
                 }
 
                 if (!success)
-                    throw new Exception($"All animation export formats failed for '{animName}' (fbx, fbxa, gltf2, glb2, collada)");
+                    throw new Exception($"All formal animation export formats failed for '{animName}' (fbx, fbxa, gltf2, glb2)");
 
                 if (exportedPath != null)
                     Console.WriteLine($"    Animation exported: {Path.GetFileName(exportedPath)}");

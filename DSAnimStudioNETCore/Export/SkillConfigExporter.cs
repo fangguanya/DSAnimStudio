@@ -5,6 +5,7 @@ using System.Linq;
 using System.Xml.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using SoulsFormats;
 using SoulsAssetPipeline.Animation;
 
 namespace DSAnimStudio.Export
@@ -15,11 +16,34 @@ namespace DSAnimStudio.Export
     /// </summary>
     public class SkillConfigExporter
     {
+        public sealed class SkillConfigExportContext
+        {
+            public string CharacterId { get; set; }
+            public float FrameRate { get; set; } = 30.0f;
+            public JObject Params { get; set; }
+            public JObject Prosthetics { get; set; }
+            public IReadOnlyList<FLVER2> ModelFlvers { get; set; }
+            public Func<string, string> ResolveAnimationFileName { get; set; }
+        }
+
         /// <summary>
         /// TAE template parsed from TAE.Template.SDT.xml.
         /// Maps event type ID to its definition (name, parameter types/names).
         /// </summary>
         private Dictionary<int, TaeEventTemplate> _eventTemplates;
+
+        private static readonly Dictionary<string, int> ParamTypeSizes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["b"] = 1,
+            ["u8"] = 1,
+            ["s8"] = 1,
+            ["u16"] = 2,
+            ["s16"] = 2,
+            ["u32"] = 4,
+            ["s32"] = 4,
+            ["f32"] = 4,
+            ["x32"] = 4,
+        };
 
         public class TaeEventTemplate
         {
@@ -95,28 +119,55 @@ namespace DSAnimStudio.Export
         }
 
         /// <summary>
-        /// Export all TAE actions from a TAE file to a structured JSON object.
+        /// Export all TAE actions from a TAE file to the canonical skill config JSON schema.
         /// </summary>
-        public JObject ExportTaeEvents(TAE tae, string characterId = null)
+        public JObject ExportSkillConfig(TAE tae, SkillConfigExportContext context)
         {
-            var result = new JObject();
-            result["version"] = "1.0";
-            result["gameType"] = "SDT";
-            result["characterId"] = characterId ?? "";
+            if (tae == null)
+                throw new ArgumentNullException(nameof(tae));
 
-            var animationsObj = new JObject();
+            context ??= new SkillConfigExportContext();
+
+            var result = new JObject
+            {
+                ["version"] = "2.0",
+                ["gameType"] = "SDT",
+                ["characters"] = new JArray(),
+                ["params"] = context.Params ?? new JObject(),
+            };
+
+            if (context.Prosthetics != null)
+                result["prosthetics"] = context.Prosthetics;
+
+            var characterObj = new JObject
+            {
+                ["id"] = context.CharacterId ?? string.Empty,
+                ["animations"] = new JArray(),
+            };
+
+            var dummyPolys = ExportDummyPolys(context.ModelFlvers);
+            if (dummyPolys.Count > 0)
+                characterObj["dummyPolys"] = dummyPolys;
 
             foreach (var anim in tae.Animations)
             {
-                string animKey = FormatAnimationKey(anim.ID);
-                var animObj = new JObject();
-                animObj["id"] = anim.ID;
+                string animName = FormatAnimationKey(anim.ID);
+                string resolvedFileName = context.ResolveAnimationFileName?.Invoke(animName);
+                if (string.IsNullOrWhiteSpace(resolvedFileName))
+                    resolvedFileName = $"{animName}.gltf";
 
-                // Get anim file name from header
-                string animFileName = "";
-                if (anim.Header is TAE.Animation.AnimFileHeader.Standard stdHeader)
-                    animFileName = stdHeader.AnimFileName ?? "";
-                animObj["name"] = animFileName;
+                var animObj = new JObject
+                {
+                    ["id"] = anim.ID,
+                    ["name"] = animName,
+                    ["fileName"] = Path.GetFileName(resolvedFileName),
+                    ["frameRate"] = context.FrameRate,
+                    ["frameCount"] = ResolveFrameCount(anim, context.FrameRate),
+                };
+
+                string sourceAnimFileName = GetSourceAnimationFileName(anim);
+                if (!string.IsNullOrWhiteSpace(sourceAnimFileName))
+                    animObj["sourceAnimFileName"] = sourceAnimFileName;
 
                 var eventsArray = new JArray();
 
@@ -124,20 +175,17 @@ namespace DSAnimStudio.Export
                 {
                     foreach (var action in anim.Actions)
                     {
-                        var eventObj = SerializeAction(action);
+                        var eventObj = SerializeAction(action, context.FrameRate);
                         eventsArray.Add(eventObj);
                     }
                 }
 
                 animObj["events"] = eventsArray;
                 animObj["eventCount"] = eventsArray.Count;
-
-                animationsObj[animKey] = animObj;
+                ((JArray)characterObj["animations"]).Add(animObj);
             }
 
-            result["animations"] = animationsObj;
-            result["totalAnimations"] = tae.Animations.Count;
-            result["totalEvents"] = tae.Animations.Sum(a => a.Actions?.Count ?? 0);
+            ((JArray)result["characters"]).Add(characterObj);
 
             return result;
         }
@@ -145,12 +193,14 @@ namespace DSAnimStudio.Export
         /// <summary>
         /// Serialize a single TAE action to JSON, using template for parameter names/types.
         /// </summary>
-        private JObject SerializeAction(TAE.Action action)
+        private JObject SerializeAction(TAE.Action action, float frameRate)
         {
-            var obj = new JObject();
-            obj["type"] = action.Type;
-            obj["startTime"] = action.StartTime;
-            obj["endTime"] = action.EndTime;
+            var obj = new JObject
+            {
+                ["type"] = action.Type,
+                ["startFrame"] = action.StartTime * frameRate,
+                ["endFrame"] = action.EndTime * frameRate,
+            };
 
             // Category classification
             obj["category"] = ClassifyEventCategory(action.Type);
@@ -162,7 +212,7 @@ namespace DSAnimStudio.Export
             obj["typeName"] = template?.TypeName ?? $"Event_{action.Type}";
 
             // Serialize parameters
-            var paramsObj = new JObject();
+            var paramsArray = new JArray();
 
             if (action.ParameterBytes != null && template != null)
             {
@@ -171,78 +221,183 @@ namespace DSAnimStudio.Export
 
                 foreach (var paramDef in template.Parameters)
                 {
-                    object value = null;
-                    string paramName = !string.IsNullOrEmpty(paramDef.Name)
-                        ? paramDef.Name : $"param_{offset}";
-
-                    try
-                    {
-                        switch (paramDef.DataType)
-                        {
-                            case "s32":
-                                if (offset + 4 <= paramBytes.Length)
-                                {
-                                    value = BitConverter.ToInt32(paramBytes, offset);
-                                    offset += 4;
-                                }
-                                break;
-                            case "f32":
-                                if (offset + 4 <= paramBytes.Length)
-                                {
-                                    value = BitConverter.ToSingle(paramBytes, offset);
-                                    offset += 4;
-                                }
-                                break;
-                            case "u8":
-                                if (offset + 1 <= paramBytes.Length)
-                                {
-                                    value = (int)paramBytes[offset];
-                                    offset += 1;
-                                }
-                                break;
-                            case "s16":
-                                if (offset + 2 <= paramBytes.Length)
-                                {
-                                    value = (int)BitConverter.ToInt16(paramBytes, offset);
-                                    offset += 2;
-                                }
-                                break;
-                            case "b":
-                                if (offset + 1 <= paramBytes.Length)
-                                {
-                                    value = paramBytes[offset] != 0;
-                                    offset += 1;
-                                }
-                                break;
-                            default:
-                                // Unknown type, try reading as s32
-                                if (offset + 4 <= paramBytes.Length)
-                                {
-                                    value = BitConverter.ToInt32(paramBytes, offset);
-                                    offset += 4;
-                                }
-                                break;
-                        }
-                    }
-                    catch
-                    {
-                        value = null;
-                    }
-
-                    if (value != null)
-                    {
-                        paramsObj[paramName] = JToken.FromObject(value);
-                    }
+                    int byteOffset = offset;
+                    var parsedParam = TryReadParameterValue(paramBytes, ref offset, paramDef.DataType);
+                    paramsArray.Add(CreateParamEntry(
+                        string.IsNullOrWhiteSpace(paramDef.Name) ? $"param_{byteOffset}" : paramDef.Name,
+                        paramDef.DataType,
+                        byteOffset,
+                        parsedParam,
+                        string.IsNullOrWhiteSpace(paramDef.Name) ? "template-missing-name" : "template"));
                 }
+
+                if (offset < paramBytes.Length)
+                    paramsArray.Add(CreateRawTailEntry(paramBytes, offset));
             }
             else if (action.ParameterBytes != null)
             {
-                // No template - dump raw bytes as hex
-                paramsObj["rawBytes"] = BitConverter.ToString(action.ParameterBytes).Replace("-", "");
+                paramsArray.Add(CreateRawTailEntry(action.ParameterBytes, 0));
             }
 
-            obj["parameters"] = paramsObj;
+            obj["params"] = paramsArray;
             return obj;
+        }
+
+        private static JObject CreateParamEntry(string name, string dataType, int byteOffset, object value, string source)
+        {
+            var result = new JObject
+            {
+                ["name"] = name,
+                ["dataType"] = dataType,
+                ["byteOffset"] = byteOffset,
+                ["source"] = source,
+            };
+
+            if (value == null)
+            {
+                result["value"] = JValue.CreateNull();
+                return result;
+            }
+
+            result["value"] = JToken.FromObject(value);
+            return result;
+        }
+
+        private static JObject CreateRawTailEntry(byte[] bytes, int byteOffset)
+        {
+            return new JObject
+            {
+                ["name"] = $"param_{byteOffset}",
+                ["dataType"] = "rawBytes",
+                ["byteOffset"] = byteOffset,
+                ["source"] = "template-missing",
+                ["value"] = BitConverter.ToString(bytes.Skip(byteOffset).ToArray()).Replace("-", string.Empty),
+            };
+        }
+
+        private static object TryReadParameterValue(byte[] paramBytes, ref int offset, string dataType)
+        {
+            if (!ParamTypeSizes.TryGetValue(dataType ?? string.Empty, out int size))
+                size = 4;
+
+            if (offset + size > paramBytes.Length)
+            {
+                offset = paramBytes.Length;
+                return null;
+            }
+
+            object result;
+            switch ((dataType ?? string.Empty).ToLowerInvariant())
+            {
+                case "b":
+                    result = paramBytes[offset] != 0;
+                    break;
+                case "u8":
+                    result = (int)paramBytes[offset];
+                    break;
+                case "s8":
+                    result = (int)(sbyte)paramBytes[offset];
+                    break;
+                case "u16":
+                    result = (int)BitConverter.ToUInt16(paramBytes, offset);
+                    break;
+                case "s16":
+                    result = (int)BitConverter.ToInt16(paramBytes, offset);
+                    break;
+                case "u32":
+                    result = (long)BitConverter.ToUInt32(paramBytes, offset);
+                    break;
+                case "f32":
+                    result = BitConverter.ToSingle(paramBytes, offset);
+                    break;
+                case "x32":
+                    result = BitConverter.ToString(paramBytes, offset, 4).Replace("-", string.Empty);
+                    break;
+                case "s32":
+                default:
+                    result = BitConverter.ToInt32(paramBytes, offset);
+                    break;
+            }
+
+            offset += size;
+            return result;
+        }
+
+        private static string GetSourceAnimationFileName(TAE.Animation anim)
+        {
+            if (anim?.Header is TAE.Animation.AnimFileHeader.Standard stdHeader)
+                return stdHeader.AnimFileName ?? string.Empty;
+
+            if (anim?.Header is TAE.Animation.AnimFileHeader.ImportOtherAnim importHeader)
+                return importHeader.AnimFileName ?? string.Empty;
+
+            return string.Empty;
+        }
+
+        private static int ResolveFrameCount(TAE.Animation anim, float frameRate)
+        {
+            if (anim?.Actions == null || anim.Actions.Count == 0)
+                return 0;
+
+            float maxEndFrame = anim.Actions.Max(action => Math.Max(action.StartTime, action.EndTime) * frameRate);
+            return (int)Math.Ceiling(maxEndFrame);
+        }
+
+        private static JArray ExportDummyPolys(IReadOnlyList<FLVER2> modelFlvers)
+        {
+            var result = new JArray();
+            if (modelFlvers == null)
+                return result;
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int flverIndex = 0; flverIndex < modelFlvers.Count; flverIndex++)
+            {
+                var flver = modelFlvers[flverIndex];
+                if (flver?.Dummies == null)
+                    continue;
+
+                foreach (var dummy in flver.Dummies)
+                {
+                    string attachBoneName = ResolveBoneName(flver, dummy.AttachBoneIndex);
+                    string key = $"{dummy.ReferenceID}:{dummy.AttachBoneIndex}:{dummy.Position.X:F4}:{dummy.Position.Y:F4}:{dummy.Position.Z:F4}";
+                    if (!seen.Add(key))
+                        continue;
+
+                    result.Add(new JObject
+                    {
+                        ["referenceId"] = dummy.ReferenceID,
+                        ["parentBoneIndex"] = dummy.ParentBoneIndex,
+                        ["parentBoneName"] = ResolveBoneName(flver, dummy.ParentBoneIndex),
+                        ["attachBoneIndex"] = dummy.AttachBoneIndex,
+                        ["attachBoneName"] = attachBoneName,
+                        ["useUpwardVector"] = dummy.UseUpwardVector,
+                        ["flverIndex"] = flverIndex,
+                        ["position"] = SerializeVector(dummy.Position),
+                        ["forward"] = SerializeVector(dummy.Forward),
+                        ["upward"] = SerializeVector(dummy.Upward),
+                    });
+                }
+            }
+
+            return result;
+        }
+
+        private static JObject SerializeVector(System.Numerics.Vector3 value)
+        {
+            return new JObject
+            {
+                ["x"] = value.X,
+                ["y"] = value.Y,
+                ["z"] = value.Z,
+            };
+        }
+
+        private static string ResolveBoneName(FLVER2 flver, short boneIndex)
+        {
+            if (flver?.Nodes == null || boneIndex < 0 || boneIndex >= flver.Nodes.Count)
+                return string.Empty;
+
+            return flver.Nodes[boneIndex].Name ?? string.Empty;
         }
 
         /// <summary>
@@ -285,9 +440,9 @@ namespace DSAnimStudio.Export
         /// <summary>
         /// Export complete skill configuration for a character including TAE events.
         /// </summary>
-        public void ExportToFile(TAE tae, string outputPath, string characterId = null)
+        public void ExportToFile(TAE tae, string outputPath, SkillConfigExportContext context)
         {
-            var json = ExportTaeEvents(tae, characterId);
+            var json = ExportSkillConfig(tae, context);
 
             var dir = Path.GetDirectoryName(outputPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -295,6 +450,14 @@ namespace DSAnimStudio.Export
 
             File.WriteAllText(outputPath,
                 json.ToString(Formatting.Indented));
+        }
+
+        public void ExportToFile(TAE tae, string outputPath, string characterId = null)
+        {
+            ExportToFile(tae, outputPath, new SkillConfigExportContext
+            {
+                CharacterId = characterId,
+            });
         }
     }
 }

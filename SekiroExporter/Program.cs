@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using DSAnimStudio;
 using DSAnimStudio.Export;
 using DSAnimStudio.TaeEditor;
+using Newtonsoft.Json.Linq;
 using SoulsFormats;
 using SoulsAssetPipeline.Animation;
 using SoulsAssetPipeline;
@@ -58,8 +60,75 @@ namespace SekiroExporter
             public Dictionary<int, FormalProtectorRow> Protectors { get; } = new Dictionary<int, FormalProtectorRow>();
         }
 
+        private sealed class FormalSekiroSkillParams
+        {
+            public Dictionary<long, ParamData.BehaviorParam> BehaviorNpc { get; } = new Dictionary<long, ParamData.BehaviorParam>();
+            public Dictionary<long, ParamData.BehaviorParam> BehaviorPc { get; } = new Dictionary<long, ParamData.BehaviorParam>();
+            public Dictionary<long, ParamData.AtkParam> AtkNpc { get; } = new Dictionary<long, ParamData.AtkParam>();
+            public Dictionary<long, ParamData.AtkParam> AtkPc { get; } = new Dictionary<long, ParamData.AtkParam>();
+            public Dictionary<long, ParamData.SpEffectParam> SpEffect { get; } = new Dictionary<long, ParamData.SpEffectParam>();
+            public Dictionary<long, ParamData.EquipParamWeapon> EquipParamWeapon { get; } = new Dictionary<long, ParamData.EquipParamWeapon>();
+            public Dictionary<string, int[]> ProstheticOverrides { get; } = new Dictionary<string, int[]>(StringComparer.Ordinal);
+        }
+
+        private sealed class ExportCharacterReport
+        {
+            public string CharacterId { get; init; }
+            public bool ModelSucceeded { get; set; }
+            public string ModelFileName { get; set; }
+            public bool MaterialManifestSucceeded { get; set; }
+            public bool AnimationsSucceeded { get; set; }
+            public int AnimationCount { get; set; }
+            public bool TexturesSucceeded { get; set; }
+            public int TextureCount { get; set; }
+            public bool SkillsSucceeded { get; set; }
+            public bool ParamsSucceeded { get; set; }
+            public bool HasCanonicalSkillConfig { get; set; }
+            public string SkillConfigFileName { get; set; }
+
+            public bool IsSuccessfulFormalExport => ModelSucceeded && MaterialManifestSucceeded && AnimationsSucceeded && TexturesSucceeded && SkillsSucceeded && ParamsSucceeded && HasCanonicalSkillConfig;
+
+            public JObject ToJson()
+            {
+                return new JObject
+                {
+                    ["characterId"] = CharacterId,
+                    ["model"] = new JObject
+                    {
+                        ["success"] = ModelSucceeded,
+                        ["fileName"] = ModelFileName ?? string.Empty,
+                        ["materialManifest"] = MaterialManifestSucceeded,
+                    },
+                    ["animations"] = new JObject
+                    {
+                        ["success"] = AnimationsSucceeded,
+                        ["count"] = AnimationCount,
+                    },
+                    ["textures"] = new JObject
+                    {
+                        ["success"] = TexturesSucceeded,
+                        ["count"] = TextureCount,
+                    },
+                    ["skills"] = new JObject
+                    {
+                        ["success"] = SkillsSucceeded,
+                        ["canonicalSkillConfig"] = HasCanonicalSkillConfig,
+                        ["fileName"] = SkillConfigFileName ?? string.Empty,
+                    },
+                    ["params"] = new JObject
+                    {
+                        ["success"] = ParamsSucceeded,
+                    },
+                    ["formalSuccess"] = IsSuccessfulFormalExport,
+                };
+            }
+        }
+
         private static readonly Dictionary<string, FormalSekiroEquipTables> FormalSekiroEquipTableCache
             = new Dictionary<string, FormalSekiroEquipTables>(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly Dictionary<string, FormalSekiroSkillParams> FormalSekiroSkillParamCache
+            = new Dictionary<string, FormalSekiroSkillParams>(StringComparer.OrdinalIgnoreCase);
 
         static int Main(string[] args)
         {
@@ -124,6 +193,7 @@ namespace SekiroExporter
             Console.WriteLine("  --model-binder <path> Optional override binder for model export (absolute or relative to game dir)");
             Console.WriteLine("  --anibnd <path>       Optional override ANIBND for animation/skill export (absolute or relative to game dir)");
             Console.WriteLine("  --anim <id>           Optional animation clip filter (e.g., a000_200000)");
+            Console.WriteLine("  --keep-intermediates  Reserved for debug exports; formal export keeps only canonical deliverables by default");
         }
 
         static Dictionary<string, string> ParseArgs(string[] args)
@@ -150,6 +220,7 @@ namespace SekiroExporter
             int completed = 0;
             int errors = 0;
             var sw = Stopwatch.StartNew();
+            var reports = new List<ExportCharacterReport>();
 
             // Process characters sequentially for cleaner output
             // (Parallel caused interleaved console output)
@@ -163,7 +234,7 @@ namespace SekiroExporter
                     int num = System.Threading.Interlocked.Increment(ref completed);
                     Console.WriteLine($"━━━ [{num}/{chrFiles.Count}] {chrId} ━━━");
 
-                    ExportCharacter(gameDir, chrPath, chrId, chrOutputDir, args, ExportSections.All);
+                    reports.Add(ExportCharacter(gameDir, chrPath, chrId, chrOutputDir, args, ExportSections.All));
                     Console.WriteLine();
                 }
                 catch (Exception ex)
@@ -175,14 +246,28 @@ namespace SekiroExporter
             }
 
             sw.Stop();
+            string summaryPath = Path.Combine(output, "export_summary.json");
+            var summaryJson = new JObject
+            {
+                ["characters"] = new JArray(reports.Select(report => report.ToJson())),
+                ["formalSuccessCount"] = reports.Count(report => report.IsSuccessfulFormalExport),
+                ["formalFailureCount"] = reports.Count(report => !report.IsSuccessfulFormalExport),
+                ["exceptionCount"] = errors,
+                ["elapsedSeconds"] = sw.Elapsed.TotalSeconds,
+            };
+            File.WriteAllText(summaryPath, summaryJson.ToString(Newtonsoft.Json.Formatting.Indented));
+
             Console.WriteLine($"═══════════════════════════════════════════");
-            Console.WriteLine($"Export complete: {completed - errors} succeeded, {errors} failed in {sw.Elapsed.TotalSeconds:F1}s");
-            return errors > 0 ? 1 : 0;
+            Console.WriteLine($"Export complete: {reports.Count(report => report.IsSuccessfulFormalExport)} formal successes, {reports.Count(report => !report.IsSuccessfulFormalExport)} formal failures, {errors} exceptions in {sw.Elapsed.TotalSeconds:F1}s");
+            Console.WriteLine($"Summary: {summaryPath}");
+            return (errors > 0 || reports.Any(report => !report.IsSuccessfulFormalExport)) ? 1 : 0;
         }
 
-        static void ExportCharacter(string gameDir, string chrBndPath, string chrId, string outputDir,
+        static ExportCharacterReport ExportCharacter(string gameDir, string chrBndPath, string chrId, string outputDir,
             Dictionary<string, string> args, ExportSections sections)
         {
+            var report = new ExportCharacterReport { CharacterId = chrId };
+
             Directory.CreateDirectory(outputDir);
             string modelDir = Path.Combine(outputDir, "Model");
             string animDir = Path.Combine(outputDir, "Animations");
@@ -358,7 +443,11 @@ namespace SekiroExporter
                     // Check for the actual output file (format may have fallen back to .gltf/.glb/.dae)
                     string actualModelFile = FindExportedFile(modelDir, chrId, new[] { ".fbx", ".gltf", ".glb" });
                     if (actualModelFile != null)
+                    {
+                        report.ModelSucceeded = true;
+                        report.ModelFileName = Path.GetFileName(actualModelFile);
                         Console.WriteLine($"  ✓ Model: {Path.GetFileName(actualModelFile)} ({new FileInfo(actualModelFile).Length / 1024}KB)");
+                    }
                     else
                         Console.Error.WriteLine($"  ✗ Model: no formal model deliverable produced (.fbx/.gltf/.glb)");
                 }
@@ -373,6 +462,7 @@ namespace SekiroExporter
                     var matExporter = new MaterialManifestExporter();
                     string matPath = Path.Combine(modelDir, "material_manifest.json");
                     matExporter.ExportToFile(modelFlvers, matPath);
+                    report.MaterialManifestSucceeded = true;
                     Console.WriteLine($"  ✓ Material manifest exported");
                 }
                 catch (Exception ex)
@@ -414,6 +504,8 @@ namespace SekiroExporter
                         Console.Error.WriteLine($"  Warning: TPF export error: {ex.Message}");
                     }
                 }
+                report.TextureCount = texCount;
+                report.TexturesSucceeded = texCount > 0 && texErrors == 0;
                 Console.WriteLine($"  ✓ Textures: {texCount} exported{(texErrors > 0 ? $", {texErrors} errors" : "")}");
             }
 
@@ -439,6 +531,8 @@ namespace SekiroExporter
                     int animCount = Directory.GetFiles(animDir, "*.gltf").Length
                         + Directory.GetFiles(animDir, "*.fbx").Length
                         + Directory.GetFiles(animDir, "*.glb").Length;
+                    report.AnimationCount = animCount;
+                    report.AnimationsSucceeded = animCount > 0;
                     Console.WriteLine($"  ✓ Animations: {animCount} formal clips exported");
                 }
                 catch (Exception ex)
@@ -458,6 +552,7 @@ namespace SekiroExporter
             {
                 Directory.CreateDirectory(skillDir);
                 var skillExporter = new SkillConfigExporter();
+                var paramExporter = new ParamExporter();
 
                 // Try to load template
                 string templatePath = Path.Combine(
@@ -467,7 +562,22 @@ namespace SekiroExporter
 
                 try
                 {
-                    skillExporter.ExportToFile(tae, Path.Combine(skillDir, "skill_config.json"), chrId);
+                    FormalSekiroSkillParams formalParams = LoadFormalSekiroSkillParams(gameDir);
+                    var exportedParams = BuildCanonicalParamPayload(paramExporter, formalParams);
+                    var prosthetics = paramExporter.ExportProstheticOverrides(formalParams.ProstheticOverrides);
+                    string skillConfigPath = Path.Combine(skillDir, "skill_config.json");
+                    skillExporter.ExportToFile(tae, skillConfigPath, new SkillConfigExporter.SkillConfigExportContext
+                    {
+                        CharacterId = chrId,
+                        ModelFlvers = modelFlvers,
+                        Params = exportedParams,
+                        Prosthetics = prosthetics,
+                        ResolveAnimationFileName = animName => ResolveAnimationDeliverableFileName(animDir, animName),
+                    });
+                    report.ParamsSucceeded = exportedParams.Properties().Count() >= 4;
+                    report.SkillsSucceeded = true;
+                    report.HasCanonicalSkillConfig = true;
+                    report.SkillConfigFileName = Path.GetFileName(skillConfigPath);
                     Console.WriteLine($"  ✓ Skills: {tae.Animations.Count} animations, skill_config.json exported");
                 }
                 catch (Exception ex)
@@ -475,6 +585,12 @@ namespace SekiroExporter
                     Console.Error.WriteLine($"  ✗ Skill config error: {ex.Message}");
                 }
             }
+
+            string reportPath = Path.Combine(outputDir, "export_report.json");
+            File.WriteAllText(reportPath, report.ToJson().ToString(Newtonsoft.Json.Formatting.Indented));
+            Console.WriteLine($"  Report: {Path.GetFileName(reportPath)} {(report.IsSuccessfulFormalExport ? "OK" : "FAILED")}");
+
+            return report;
         }
 
         /// <summary>
@@ -955,6 +1071,123 @@ namespace SekiroExporter
             for (int i = 0; i < bitCount; i++)
                 result.Add((bytes[i / 8] & (1 << (i % 8))) != 0);
             return result;
+        }
+
+        static FormalSekiroSkillParams LoadFormalSekiroSkillParams(string gameDir)
+        {
+            string normalizedGameDir = Path.GetFullPath(gameDir);
+            if (FormalSekiroSkillParamCache.TryGetValue(normalizedGameDir, out var cached))
+                return cached;
+
+            string paramBinderPath = Path.Combine(normalizedGameDir, "param", "gameparam", "gameparam.parambnd.dcx");
+            if (!File.Exists(paramBinderPath))
+                throw new FileNotFoundException($"Formal Sekiro gameparam binder not found: {paramBinderPath}");
+
+            byte[] paramBinderBytes = File.ReadAllBytes(paramBinderPath);
+            if (DCX.Is(paramBinderBytes))
+                paramBinderBytes = DCX.Decompress(paramBinderBytes);
+
+            var paramBinder = BND4.Read(paramBinderBytes);
+            var result = new FormalSekiroSkillParams();
+
+            RunWithSekiroDocumentContext(() =>
+            {
+                ReadTypedParamRows(paramBinder, "BehaviorParam", result.BehaviorNpc);
+                ReadTypedParamRows(paramBinder, "BehaviorParam_PC", result.BehaviorPc);
+                ReadTypedParamRows(paramBinder, "AtkParam_Npc", result.AtkNpc);
+                ReadTypedParamRows(paramBinder, "AtkParam_Pc", result.AtkPc);
+                ReadTypedParamRows(paramBinder, "SpEffectParam", result.SpEffect);
+                ReadTypedParamRows(paramBinder, "EquipParamWeapon", result.EquipParamWeapon);
+                return 0;
+            });
+
+            FormalSekiroSkillParamCache[normalizedGameDir] = result;
+            return result;
+        }
+
+        static void ReadTypedParamRows<T>(BND4 paramBinder, string paramName, Dictionary<long, T> destination)
+            where T : ParamData, new()
+        {
+            var param = ReadParamHackFromBinder(paramBinder, paramName);
+            try
+            {
+                foreach (var row in param.Rows)
+                {
+                    var entry = new T
+                    {
+                        ID = row.ID,
+                        Name = row.Name,
+                    };
+                    entry.Read(param.GetRowReader(row));
+                    destination[row.ID] = entry;
+                }
+            }
+            finally
+            {
+                param.DisposeRowReader();
+            }
+        }
+
+        static JObject BuildCanonicalParamPayload(ParamExporter exporter, FormalSekiroSkillParams formalParams)
+        {
+            return exporter.ExportTypedParams(new Dictionary<string, JObject>(StringComparer.Ordinal)
+            {
+                ["AtkParam"] = new JObject
+                {
+                    ["player"] = exporter.ExportTypedParamTable(formalParams.AtkPc, "AtkParam_Pc"),
+                    ["npc"] = exporter.ExportTypedParamTable(formalParams.AtkNpc, "AtkParam_Npc"),
+                },
+                ["BehaviorParam"] = new JObject
+                {
+                    ["player"] = exporter.ExportTypedParamTable(formalParams.BehaviorPc, "BehaviorParam_PC"),
+                    ["npc"] = exporter.ExportTypedParamTable(formalParams.BehaviorNpc, "BehaviorParam"),
+                },
+                ["SpEffectParam"] = exporter.ExportTypedParamTable(formalParams.SpEffect, "SpEffectParam"),
+                ["EquipParamWeapon"] = exporter.ExportTypedParamTable(formalParams.EquipParamWeapon, "EquipParamWeapon"),
+            });
+        }
+
+        static string ResolveAnimationDeliverableFileName(string animDir, string animName)
+        {
+            return Path.GetFileName(FindExportedFile(animDir, animName, new[] { ".fbx", ".gltf", ".glb" })
+                ?? $"{animName}.gltf");
+        }
+
+        static T RunWithSekiroDocumentContext<T>(Func<T> callback)
+        {
+            if (callback == null)
+                throw new ArgumentNullException(nameof(callback));
+
+            var managerType = typeof(zzz_DocumentManager);
+            var currentDocumentField = managerType.GetField("_currentDocument", BindingFlags.Static | BindingFlags.NonPublic);
+            var documentsField = managerType.GetField("Documents", BindingFlags.Static | BindingFlags.NonPublic);
+            if (currentDocumentField == null || documentsField == null)
+                throw new InvalidOperationException("Unable to establish a temporary Sekiro document context.");
+
+            var previousCurrentDocument = currentDocumentField.GetValue(null);
+            var documents = (System.Collections.IList)documentsField.GetValue(null);
+
+            var fakeDoc = new zzz_DocumentIns((DSAProj)null)
+            {
+                GameRoot = null,
+            };
+            fakeDoc.GameRoot = new zzz_GameRootIns(fakeDoc)
+            {
+                GameType = SoulsGames.SDT,
+            };
+
+            documents?.Add(fakeDoc);
+            currentDocumentField.SetValue(null, fakeDoc);
+
+            try
+            {
+                return callback();
+            }
+            finally
+            {
+                currentDocumentField.SetValue(null, previousCurrentDocument);
+                documents?.Remove(fakeDoc);
+            }
         }
 
         static string GetProtectorPrefix(FormalProtectorRow protectorRow, NewChrAsm.EquipSlotTypes slot, int equipId)
