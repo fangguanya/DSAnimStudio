@@ -15,6 +15,15 @@ namespace DSAnimStudio.Export
     /// </summary>
     public class MaterialManifestExporter
     {
+        private sealed class ManifestMaterialEntry
+        {
+            public int Index { get; init; }
+            public string Name { get; init; }
+            public string Mtd { get; init; }
+            public JArray Textures { get; init; }
+            public JArray MeshIndices { get; } = new JArray();
+        }
+
         /// <summary>
         /// Texture slot type classification matching FlverMaterial.cs classification logic.
         /// </summary>
@@ -34,71 +43,113 @@ namespace DSAnimStudio.Export
         /// </summary>
         public JObject GenerateManifest(FLVER2 flver, string textureFileExtension = ".png")
         {
+            return GenerateManifest(new[] { flver }, textureFileExtension);
+        }
+
+        /// <summary>
+        /// Generate material manifest from the final assembled FLVER set for a character.
+        /// </summary>
+        public JObject GenerateManifest(IReadOnlyList<FLVER2> flvers, string textureFileExtension = ".png")
+        {
+            if (flvers == null)
+                throw new ArgumentNullException(nameof(flvers));
+
+            var validFlvers = flvers.Where(flver => flver != null).ToList();
+            if (validFlvers.Count == 0)
+                throw new ArgumentException("At least one non-null FLVER is required.", nameof(flvers));
+
             var result = new JObject();
             result["version"] = "1.0";
             result["textureFormat"] = textureFileExtension.TrimStart('.');
 
             var materialsArray = new JArray();
+            var manifestEntries = new Dictionary<string, ManifestMaterialEntry>(StringComparer.Ordinal);
+            int nextMaterialIndex = 0;
+            int globalMeshIndexOffset = 0;
 
-            for (int matIdx = 0; matIdx < flver.Materials.Count; matIdx++)
+            foreach (var flver in validFlvers)
             {
-                var mat = flver.Materials[matIdx];
-                var matObj = new JObject();
-                matObj["index"] = matIdx;
-                matObj["name"] = mat.Name ?? "";
-                matObj["mtd"] = mat.MTD ?? "";
-
-                var texturesArray = new JArray();
-
-                // Track indices for multi-texture slots (Albedo1/2, Normal1/2, etc.)
-                int indexAlbedo = 0, indexSpecular = 0, indexNormal = 0;
-                int indexEmissive = 0, indexShininess = 0;
-
-                foreach (var tex in mat.Textures)
+                for (int matIdx = 0; matIdx < flver.Materials.Count; matIdx++)
                 {
-                    if (string.IsNullOrEmpty(tex.Path)) continue;
+                    var mat = flver.Materials[matIdx];
+                    string key = $"{mat.Name ?? string.Empty}\u001F{mat.MTD ?? string.Empty}";
 
-                    var texObj = new JObject();
-                    texObj["type"] = tex.Type ?? "";
-                    texObj["gamePath"] = tex.Path;
-
-                    // Extract file name from game path
-                    string texFileName = FlverToFbxExporter.GetTextureFileName(tex.Path);
-                    texObj["exportedFile"] = texFileName + textureFileExtension;
-
-                    // Classify texture type
-                    var slotType = ClassifyTextureType(tex.Type,
-                        ref indexAlbedo, ref indexSpecular, ref indexNormal,
-                        ref indexEmissive, ref indexShininess);
-                    texObj["slotType"] = slotType.ToString();
-
-                    texObj["scale"] = new JObject
+                    if (!manifestEntries.TryGetValue(key, out var manifestEntry))
                     {
-                        ["x"] = tex.Scale.X,
-                        ["y"] = tex.Scale.Y
-                    };
+                        manifestEntry = new ManifestMaterialEntry
+                        {
+                            Index = nextMaterialIndex++,
+                            Name = mat.Name ?? string.Empty,
+                            Mtd = mat.MTD ?? string.Empty,
+                            Textures = BuildTextureArray(mat, textureFileExtension),
+                        };
+                        manifestEntries.Add(key, manifestEntry);
+                    }
 
-                    texturesArray.Add(texObj);
+                    for (int meshIdx = 0; meshIdx < flver.Meshes.Count; meshIdx++)
+                    {
+                        if (flver.Meshes[meshIdx].MaterialIndex == matIdx)
+                            manifestEntry.MeshIndices.Add(globalMeshIndexOffset + meshIdx);
+                    }
                 }
 
-                matObj["textures"] = texturesArray;
+                globalMeshIndexOffset += flver.Meshes.Count;
+            }
 
-                // Find which meshes use this material
-                var meshIndices = new JArray();
-                for (int meshIdx = 0; meshIdx < flver.Meshes.Count; meshIdx++)
-                {
-                    if (flver.Meshes[meshIdx].MaterialIndex == matIdx)
-                        meshIndices.Add(meshIdx);
-                }
-                matObj["meshIndices"] = meshIndices;
-
+            foreach (var manifestEntry in manifestEntries.Values.OrderBy(entry => entry.Index))
+            {
+                var matObj = new JObject();
+                matObj["index"] = manifestEntry.Index;
+                matObj["name"] = manifestEntry.Name;
+                matObj["mtd"] = manifestEntry.Mtd;
+                matObj["textures"] = manifestEntry.Textures;
+                matObj["meshIndices"] = manifestEntry.MeshIndices;
                 materialsArray.Add(matObj);
             }
 
             result["materials"] = materialsArray;
-            result["materialCount"] = flver.Materials.Count;
+            result["materialCount"] = materialsArray.Count;
 
             return result;
+        }
+
+        private static JArray BuildTextureArray(FLVER2.Material mat, string textureFileExtension)
+        {
+            var texturesArray = new JArray();
+
+            int indexAlbedo = 0;
+            int indexSpecular = 0;
+            int indexNormal = 0;
+            int indexEmissive = 0;
+            int indexShininess = 0;
+
+            foreach (var tex in mat.Textures)
+            {
+                if (string.IsNullOrEmpty(tex.Path))
+                    continue;
+
+                var texObj = new JObject();
+                texObj["type"] = tex.Type ?? "";
+                texObj["gamePath"] = tex.Path;
+
+                string texFileName = FlverToFbxExporter.GetTextureFileName(tex.Path);
+                texObj["exportedFile"] = texFileName + textureFileExtension;
+
+                var slotType = ClassifyTextureType(tex.Type,
+                    ref indexAlbedo, ref indexSpecular, ref indexNormal,
+                    ref indexEmissive, ref indexShininess);
+                texObj["slotType"] = slotType.ToString();
+
+                texObj["scale"] = new JObject
+                {
+                    ["x"] = tex.Scale.X,
+                    ["y"] = tex.Scale.Y
+                };
+
+                texturesArray.Add(texObj);
+            }
+
+            return texturesArray;
         }
 
         /// <summary>
@@ -160,7 +211,15 @@ namespace DSAnimStudio.Export
         /// </summary>
         public void ExportToFile(FLVER2 flver, string outputPath, string textureFileExtension = ".png")
         {
-            var manifest = GenerateManifest(flver, textureFileExtension);
+            ExportToFile(new[] { flver }, outputPath, textureFileExtension);
+        }
+
+        /// <summary>
+        /// Export manifest for the final assembled FLVER set to a JSON file.
+        /// </summary>
+        public void ExportToFile(IReadOnlyList<FLVER2> flvers, string outputPath, string textureFileExtension = ".png")
+        {
+            var manifest = GenerateManifest(flvers, textureFileExtension);
 
             var dir = Path.GetDirectoryName(outputPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))

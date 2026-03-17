@@ -40,6 +40,16 @@ namespace DSAnimStudio.Export
             _options = options ?? new ExportOptions();
         }
 
+        private static Matrix4x4 ConvertSourceMatrixToGltf(Matrix4x4 value)
+        {
+            return AssimpExportTransformUtils.ConvertSourceMatrixToGltf(value);
+        }
+
+        private static Vector3 ConvertSourceVectorToGltf(Vector3 value)
+        {
+            return AssimpExportTransformUtils.ConvertSourceVectorToGltf(value);
+        }
+
         /// <summary>
         /// Export an animation with its skeleton to a standalone FBX file.
         /// </summary>
@@ -47,10 +57,12 @@ namespace DSAnimStudio.Export
         /// <param name="animData">The parsed HavokAnimationData</param>
         /// <param name="animName">Name for the animation clip</param>
         /// <param name="outputPath">Output FBX file path</param>
-        public void Export(HKX skeletonHkx, HavokAnimationData animData, string animName, string outputPath)
+        public void Export(HKX skeletonHkx, HavokAnimationData animData, string animName, string outputPath,
+            IReadOnlyList<FLVER2> sceneFlvers)
         {
             var scene = new Scene();
             scene.RootNode = new Node("RootNode");
+            scene.RootNode.Transform = AssimpExportTransformUtils.ToAssimpMatrix(AssimpExportTransformUtils.RootNodeCorrectionGltf);
 
             // Extract skeleton from HKX
             HKX.HKASkeleton skeleton = null;
@@ -78,6 +90,16 @@ namespace DSAnimStudio.Export
 
             // Build skeleton node tree
             var boneNodes = BuildSkeletonFromHkx(skeleton, scene.RootNode);
+            AssimpExportTransformUtils.LogSkeletonSelfCheck("HKX", boneNodes);
+
+            if (sceneFlvers == null || !sceneFlvers.Any(f => f?.Meshes != null && f.Meshes.Count > 0))
+                throw new InvalidOperationException("Formal animation export requires real FLVER meshes; synthetic carrier meshes are not allowed.");
+
+            var sceneBoneNames = new HashSet<string>(
+                boneNodes.Where(node => node != null).Select(node => node.Name),
+                StringComparer.Ordinal);
+
+            AppendSceneMeshes(scene, sceneFlvers, sceneBoneNames);
 
             // Extract root motion reference frame if available
             HKX.HKADefaultAnimatedReferenceFrame rootMotion = null;
@@ -94,14 +116,15 @@ namespace DSAnimStudio.Export
             }
 
             // Build animation
-            var anim = BuildAnimation(skeleton, animData, animName, boneNodes, rootMotion);
+            var anim = BuildAnimation(skeleton, animData, animName, rootMotion);
             if (anim != null)
             {
                 scene.Animations.Add(anim);
             }
 
-            // Need at least one material for valid FBX
-            scene.Materials.Add(new Material { Name = "DefaultMaterial" });
+            // Need at least one material for valid export scenes.
+            if (scene.Materials.Count == 0)
+                scene.Materials.Add(new Material { Name = "DefaultMaterial" });
 
             // Export
             using (var ctx = new AssimpContext())
@@ -114,6 +137,7 @@ namespace DSAnimStudio.Export
                 string[] formatsToTry = { "fbx", "fbxa", "gltf2", "glb2", "collada" };
                 string[] extensions = { ".fbx", ".fbx", ".gltf", ".glb", ".dae" };
                 bool success = false;
+                string exportedPath = null;
                 for (int i = 0; i < formatsToTry.Length; i++)
                 {
                     string fmt = formatsToTry[i];
@@ -121,16 +145,27 @@ namespace DSAnimStudio.Export
                     try
                     {
                         success = ctx.ExportFile(scene, tryPath, fmt);
+                        Console.WriteLine($"    Animation export format '{fmt}': {(success ? "SUCCESS" : "FAILED")} -> {tryPath}");
                         if (success)
                         {
+                            exportedPath = tryPath;
                             // Post-process: fix absolute buffer URIs in glTF files
                             if (tryPath.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase))
                                 FixGltfBufferUris(tryPath);
                             break;
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"    Animation export format '{fmt}': EXCEPTION -> {ex.Message}");
+                    }
                 }
+
+                if (!success)
+                    throw new Exception($"All animation export formats failed for '{animName}' (fbx, fbxa, gltf2, glb2, collada)");
+
+                if (exportedPath != null)
+                    Console.WriteLine($"    Animation exported: {Path.GetFileName(exportedPath)}");
             }
         }
 
@@ -139,38 +174,16 @@ namespace DSAnimStudio.Export
         /// </summary>
         private static void FixGltfBufferUris(string gltfPath)
         {
-            try
-            {
-                string json = File.ReadAllText(gltfPath);
-                bool modified = false;
-                var lines = json.Split('\n');
-                for (int i = 0; i < lines.Length; i++)
-                {
-                    string line = lines[i];
-                    int uriIdx = line.IndexOf("\"uri\"", StringComparison.Ordinal);
-                    if (uriIdx < 0) continue;
-                    int firstQuote = line.IndexOf('"', uriIdx + 5);
-                    if (firstQuote < 0) continue;
-                    int secondQuote = line.IndexOf('"', firstQuote + 1);
-                    if (secondQuote < 0) continue;
-                    string uri = line.Substring(firstQuote + 1, secondQuote - firstQuote - 1);
-                    if (uri.Length > 2 && (uri[1] == ':' || uri[0] == '/'))
-                    {
-                        string filename = Path.GetFileName(uri.Replace('\\', '/'));
-                        lines[i] = line.Substring(0, firstQuote + 1) + filename + line.Substring(secondQuote);
-                        modified = true;
-                    }
-                }
-                if (modified)
-                    File.WriteAllText(gltfPath, string.Join("\n", lines));
-            }
-            catch { }
+            string animationName = Path.GetFileNameWithoutExtension(gltfPath);
+            GltfPostProcessor.PostProcess(gltfPath, animationName);
         }
 
         /// <summary>
         /// Batch export all animations from an ANIBND archive.
         /// </summary>
         public void ExportAnibnd(byte[] anibndBytes, HKX skeletonHkx, string outputDir,
+            IReadOnlyList<FLVER2> sceneFlvers,
+            string animationFilter = null,
             Action<string, int, int> progressCallback = null)
         {
             var bnd = BND4.Read(anibndBytes);
@@ -194,6 +207,17 @@ namespace DSAnimStudio.Export
                      f.Name.EndsWith(".hkx.dcx", StringComparison.OrdinalIgnoreCase)) &&
                     f.ID != 7000000)
                 .ToList();
+
+            if (!string.IsNullOrWhiteSpace(animationFilter))
+            {
+                string normalizedFilter = NormalizeAnimationName(animationFilter);
+                animFiles = animFiles
+                    .Where(f => NormalizeAnimationName(Path.GetFileNameWithoutExtension(f.Name ?? string.Empty)) == normalizedFilter)
+                    .ToList();
+
+                if (animFiles.Count == 0)
+                    throw new InvalidOperationException($"Animation '{animationFilter}' was not found in ANIBND.");
+            }
 
             int total = animFiles.Count;
             int current = 0;
@@ -223,7 +247,7 @@ namespace DSAnimStudio.Export
                         cleanName = cleanName.Substring(0, cleanName.Length - 4);
                     string outPath = Path.Combine(outputDir, $"{cleanName}.fbx");
 
-                    Export(skeletonHkx, animData, cleanName, outPath);
+                    Export(skeletonHkx, animData, cleanName, outPath, sceneFlvers);
                     exported++;
                 }
                 catch (Exception ex)
@@ -240,6 +264,14 @@ namespace DSAnimStudio.Export
             }
 
             progressCallback?.Invoke("done", exported, total);
+        }
+
+        private static string NormalizeAnimationName(string name)
+        {
+            string normalized = name?.Trim() ?? string.Empty;
+            if (normalized.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase))
+                normalized = normalized.Substring(0, normalized.Length - 4);
+            return normalized;
         }
 
         /// <summary>
@@ -294,6 +326,24 @@ namespace DSAnimStudio.Export
                 return null;
             }
 
+            HKX.HKASkeleton exportSkeleton = null;
+            if (skeletonHkx?.DataSection?.Objects != null)
+            {
+                foreach (var obj in skeletonHkx.DataSection.Objects)
+                {
+                    if (obj is HKX.HKASkeleton asSkeleton)
+                    {
+                        exportSkeleton = asSkeleton;
+                        break;
+                    }
+                }
+            }
+
+            HKX.HKAAnimationBinding binding = null;
+            HKX.HKADefaultAnimatedReferenceFrame referenceFrame = null;
+            HKX.HKASplineCompressedAnimation splineAnimation = null;
+            HKX.HKAInterleavedUncompressedAnimation interleavedAnimation = null;
+
             // Debug: log what object types are in the DataSection
             if (_debugLogCount < 3)
             {
@@ -306,11 +356,30 @@ namespace DSAnimStudio.Export
 
             foreach (var obj in hkx.DataSection.Objects)
             {
-                if (obj is HKX.HKASplineCompressedAnimation spline)
-                    return new HavokAnimationData_SplineCompressed(0, "", spline);
-                if (obj is HKX.HKAInterleavedUncompressedAnimation interleaved)
-                    return new HavokAnimationData_InterleavedUncompressed(0, "", interleaved);
+                if (obj is HKX.HKAAnimationBinding asBinding)
+                    binding = asBinding;
+                else if (obj is HKX.HKADefaultAnimatedReferenceFrame asReferenceFrame)
+                    referenceFrame = asReferenceFrame;
+                else if (obj is HKX.HKASplineCompressedAnimation asSpline)
+                    splineAnimation = asSpline;
+                else if (obj is HKX.HKAInterleavedUncompressedAnimation asInterleaved)
+                    interleavedAnimation = asInterleaved;
             }
+
+            if (exportSkeleton != null && binding != null)
+            {
+                if (splineAnimation != null)
+                    return new HavokAnimationData_SplineCompressed(0, "", exportSkeleton, referenceFrame, binding, splineAnimation);
+
+                if (interleavedAnimation != null)
+                    return new HavokAnimationData_InterleavedUncompressed(0, "", exportSkeleton, referenceFrame, binding, interleavedAnimation);
+            }
+
+            if (splineAnimation != null)
+                return new HavokAnimationData_SplineCompressed(0, "", splineAnimation);
+
+            if (interleavedAnimation != null)
+                return new HavokAnimationData_InterleavedUncompressed(0, "", interleavedAnimation);
 
             return null;
         }
@@ -320,50 +389,314 @@ namespace DSAnimStudio.Export
         /// </summary>
         private List<Node> BuildSkeletonFromHkx(HKX.HKASkeleton skeleton, Node rootNode)
         {
-            var armatureNode = new Node("Armature", rootNode);
-            rootNode.Children.Add(armatureNode);
-
-            var boneNodes = new List<Node>();
             float scale = _options.ScaleFactor;
 
-            for (int i = 0; i < skeleton.Bones.Size; i++)
+            return AssimpExportTransformUtils.BuildSkeletonHierarchy(
+                (int)skeleton.Bones.Size,
+                i => skeleton.Bones[i].Name.GetString() ?? $"Bone_{i}",
+                i => skeleton.ParentIndices[i].data,
+                i =>
+                {
+                    var transform = skeleton.Transforms[i];
+                    var pos = transform.Position.Vector;
+                    var rot = transform.Rotation.Vector;
+                    var scl = transform.Scale.Vector;
+
+                    var translation = new Vector3(pos.X * scale, pos.Y * scale, pos.Z * scale);
+                    var rotation = new Quaternion(rot.X, rot.Y, rot.Z, rot.W);
+                    var boneScale = new Vector3(scl.X, scl.Y, scl.Z);
+
+                    var localMatrix = AssimpExportTransformUtils.CreateLocalMatrix(translation, rotation, boneScale);
+                    return ConvertSourceMatrixToGltf(localMatrix);
+                },
+                rootNode);
+        }
+
+        private void AppendSceneMeshes(Scene scene, IReadOnlyList<FLVER2> flvers, HashSet<string> sceneBoneNames)
+        {
+            int meshIdx = 0;
+
+            foreach (var flver in flvers.Where(f => f != null))
             {
-                var boneName = skeleton.Bones[i].Name.GetString();
-                var boneNode = new Node(boneName ?? $"Bone_{i}");
+                for (int flverMeshIdx = 0; flverMeshIdx < flver.Meshes.Count; flverMeshIdx++)
+                {
+                    var flverMesh = flver.Meshes[flverMeshIdx];
+                    if (flverMesh.Vertices == null || flverMesh.Vertices.Count == 0)
+                        continue;
 
-                // Get local transform from skeleton
-                var transform = skeleton.Transforms[i];
-                var pos = transform.Position.Vector;
-                var rot = transform.Rotation.Vector;
-                var scl = transform.Scale.Vector;
+                    var material = CreateMaterial(flver, flverMesh.MaterialIndex, scene);
+                    var assimpMesh = BuildMesh(flver, flverMesh, meshIdx, sceneBoneNames);
+                    if (assimpMesh == null)
+                    {
+                        meshIdx++;
+                        continue;
+                    }
 
-                var translation = new Vector3(pos.X * scale, pos.Y * scale, pos.Z * scale);
-                var rotation = new System.Numerics.Quaternion(rot.X, rot.Y, rot.Z, rot.W);
-                var boneScale = new Vector3(scl.X, scl.Y, scl.Z);
+                    assimpMesh.MaterialIndex = scene.Materials.IndexOf(material);
+                    if (assimpMesh.MaterialIndex < 0)
+                    {
+                        scene.Materials.Add(material);
+                        assimpMesh.MaterialIndex = scene.Materials.Count - 1;
+                    }
 
-                var localMatrix = Matrix4x4.CreateScale(boneScale)
-                    * Matrix4x4.CreateFromQuaternion(rotation)
-                    * Matrix4x4.CreateTranslation(translation);
+                    scene.Meshes.Add(assimpMesh);
 
-                boneNode.Transform = ToAssimpMatrix(localMatrix);
-                boneNodes.Add(boneNode);
+                    var meshNode = new Node($"Mesh_{meshIdx}", scene.RootNode);
+                    meshNode.MeshIndices.Add(scene.Meshes.Count - 1);
+                    scene.RootNode.Children.Add(meshNode);
+                    meshIdx++;
+                }
+            }
+        }
+
+        private Mesh BuildMesh(FLVER2 flver, FLVER2.Mesh flverMesh, int meshIdx, HashSet<string> sceneBoneNames)
+        {
+            var mesh = new Mesh($"Mesh_{meshIdx}", PrimitiveType.Triangle);
+            float scale = _options.ScaleFactor;
+            bool useGlobalBoneIndices = flver.Header.Version > 0x2000D;
+
+            foreach (var vert in flverMesh.Vertices)
+            {
+                var gltfPosition = ConvertSourceVectorToGltf(new Vector3(
+                    vert.Position.X * scale,
+                    vert.Position.Y * scale,
+                    vert.Position.Z * scale));
+                mesh.Vertices.Add(new Vector3D(gltfPosition.X, gltfPosition.Y, gltfPosition.Z));
+
+                var gltfNormal = ConvertSourceVectorToGltf(new Vector3(vert.Normal.X, vert.Normal.Y, vert.Normal.Z));
+                mesh.Normals.Add(new Vector3D(gltfNormal.X, gltfNormal.Y, gltfNormal.Z));
+
+                if (vert.Tangents != null && vert.Tangents.Count > 0)
+                {
+                    var tang = vert.Tangents[0];
+                    var gltfTangent = ConvertSourceVectorToGltf(new Vector3(tang.X, tang.Y, tang.Z));
+                    var gltfBitangent = ConvertSourceVectorToGltf(new Vector3(vert.Bitangent.X, vert.Bitangent.Y, vert.Bitangent.Z));
+                    mesh.Tangents.Add(new Vector3D(gltfTangent.X, gltfTangent.Y, gltfTangent.Z));
+                    mesh.BiTangents.Add(new Vector3D(gltfBitangent.X, gltfBitangent.Y, gltfBitangent.Z));
+                }
+
+                if (vert.Colors != null && vert.Colors.Count > 0)
+                {
+                    if (mesh.VertexColorChannelCount == 0)
+                        mesh.VertexColorChannels[0] = new List<Color4D>();
+
+                    var c = vert.Colors[0];
+                    mesh.VertexColorChannels[0].Add(new Color4D(c.R, c.G, c.B, c.A));
+                }
             }
 
-            // Build hierarchy
-            for (int i = 0; i < skeleton.Bones.Size; i++)
+            if (flverMesh.Vertices.Count > 0)
             {
-                short parentIdx = skeleton.ParentIndices[i].data;
-                if (parentIdx >= 0 && parentIdx < boneNodes.Count)
+                int uvCount = flverMesh.Vertices[0].UVs?.Count ?? 0;
+                for (int uvIdx = 0; uvIdx < Math.Min(uvCount, 8); uvIdx++)
                 {
-                    boneNodes[parentIdx].Children.Add(boneNodes[i]);
+                    mesh.TextureCoordinateChannels[uvIdx] = new List<Vector3D>();
+                    mesh.UVComponentCount[uvIdx] = 2;
+
+                    foreach (var vert in flverMesh.Vertices)
+                    {
+                        if (vert.UVs != null && uvIdx < vert.UVs.Count)
+                        {
+                            var uv = vert.UVs[uvIdx];
+                            mesh.TextureCoordinateChannels[uvIdx].Add(new Vector3D(uv.X, 1.0f - uv.Y, 0));
+                        }
+                        else
+                        {
+                            mesh.TextureCoordinateChannels[uvIdx].Add(new Vector3D(0, 0, 0));
+                        }
+                    }
+                }
+            }
+
+            if (mesh.Tangents.Count > 0 && mesh.Tangents.Count != mesh.Vertices.Count)
+            {
+                mesh.Tangents.Clear();
+                mesh.BiTangents.Clear();
+            }
+
+            if (mesh.BiTangents.Count > 0 && mesh.BiTangents.Count != mesh.Vertices.Count)
+            {
+                mesh.BiTangents.Clear();
+                if (mesh.Tangents.Count != mesh.Vertices.Count)
+                    mesh.Tangents.Clear();
+            }
+
+            if (mesh.VertexColorChannels[0] != null && mesh.VertexColorChannels[0].Count > 0
+                && mesh.VertexColorChannels[0].Count != mesh.Vertices.Count)
+            {
+                mesh.VertexColorChannels[0].Clear();
+            }
+
+            var faceSet = flverMesh.FaceSets?.FirstOrDefault(fs =>
+                (fs.Flags & FLVER2.FaceSet.FSFlags.LodLevel1) == 0 &&
+                (fs.Flags & FLVER2.FaceSet.FSFlags.LodLevel2) == 0 &&
+                (fs.Flags & FLVER2.FaceSet.FSFlags.LodLevelEx) == 0 &&
+                (fs.Flags & FLVER2.FaceSet.FSFlags.MotionBlur) == 0);
+
+            if (faceSet == null)
+                faceSet = flverMesh.FaceSets?.FirstOrDefault();
+
+            if (faceSet == null || faceSet.Indices == null || faceSet.Indices.Count < 3)
+                return null;
+
+            var indices = faceSet.Indices;
+            if (faceSet.TriangleStrip)
+            {
+                for (int i = 0; i < indices.Count - 2; i++)
+                {
+                    int i0 = indices[i];
+                    int i1 = indices[i + 1];
+                    int i2 = indices[i + 2];
+                    if (i0 == i1 || i1 == i2 || i0 == i2)
+                        continue;
+
+                    if (i % 2 == 0)
+                        mesh.Faces.Add(new Face(new[] { i0, i1, i2 }));
+                    else
+                        mesh.Faces.Add(new Face(new[] { i0, i2, i1 }));
+                }
+            }
+            else
+            {
+                for (int i = 0; i + 2 < indices.Count; i += 3)
+                    mesh.Faces.Add(new Face(new[] { indices[i], indices[i + 1], indices[i + 2] }));
+            }
+
+            var boneBuckets = new Dictionary<int, List<VertexWeight>>();
+
+            for (int vertIdx = 0; vertIdx < flverMesh.Vertices.Count; vertIdx++)
+            {
+                var vert = flverMesh.Vertices[vertIdx];
+
+                if (flverMesh.UseBoneWeights)
+                {
+                    for (int w = 0; w < 4; w++)
+                    {
+                        float weight = vert.BoneWeights[w];
+                        if (weight <= 0)
+                            continue;
+
+                        int localBoneIdx = vert.BoneIndices[w];
+                        int globalBoneIdx;
+
+                        if (useGlobalBoneIndices)
+                        {
+                            globalBoneIdx = localBoneIdx;
+                        }
+                        else
+                        {
+                            globalBoneIdx = localBoneIdx >= 0 && localBoneIdx < flverMesh.BoneIndices.Count
+                                ? flverMesh.BoneIndices[localBoneIdx]
+                                : localBoneIdx;
+                        }
+
+                        if (globalBoneIdx < 0 || globalBoneIdx >= flver.Nodes.Count)
+                            continue;
+
+                        if (!boneBuckets.ContainsKey(globalBoneIdx))
+                            boneBuckets[globalBoneIdx] = new List<VertexWeight>();
+
+                        boneBuckets[globalBoneIdx].Add(new VertexWeight(vertIdx, weight));
+                    }
                 }
                 else
                 {
-                    armatureNode.Children.Add(boneNodes[i]);
+                    int boneIdx = vert.NormalW;
+                    if (boneIdx >= 0 && boneIdx < flverMesh.BoneIndices.Count)
+                    {
+                        int globalBoneIdx = flverMesh.BoneIndices[boneIdx];
+                        if (globalBoneIdx >= 0 && globalBoneIdx < flver.Nodes.Count)
+                        {
+                            if (!boneBuckets.ContainsKey(globalBoneIdx))
+                                boneBuckets[globalBoneIdx] = new List<VertexWeight>();
+
+                            boneBuckets[globalBoneIdx].Add(new VertexWeight(vertIdx, 1.0f));
+                        }
+                    }
                 }
             }
 
-            return boneNodes;
+            foreach (var kvp in boneBuckets)
+            {
+                int globalBoneIdx = kvp.Key;
+                var weights = kvp.Value;
+
+                if (globalBoneIdx < 0 || globalBoneIdx >= flver.Nodes.Count)
+                    continue;
+
+                string boneName = flver.Nodes[globalBoneIdx].Name;
+                if (string.IsNullOrWhiteSpace(boneName))
+                    boneName = $"Bone_{globalBoneIdx}";
+
+                if (!sceneBoneNames.Contains(boneName))
+                    continue;
+
+                var bone = new Bone { Name = boneName };
+                var worldMatrix = ComputeWorldMatrix(flver.Nodes, globalBoneIdx);
+                Matrix4x4.Invert(worldMatrix, out var inverseWorld);
+                bone.OffsetMatrix = AssimpExportTransformUtils.ToAssimpMatrix(inverseWorld);
+                bone.VertexWeights.AddRange(weights);
+                mesh.Bones.Add(bone);
+            }
+
+            return mesh;
+        }
+
+        private Material CreateMaterial(FLVER2 flver, int materialIndex, Scene scene)
+        {
+            if (materialIndex < 0 || materialIndex >= flver.Materials.Count)
+            {
+                var defaultMat = new Material { Name = $"Material_{materialIndex}" };
+                scene.Materials.Add(defaultMat);
+                return defaultMat;
+            }
+
+            var flverMat = flver.Materials[materialIndex];
+            var existing = scene.Materials.FirstOrDefault(m => m.Name == flverMat.Name);
+            if (existing != null)
+                return existing;
+
+            var mat = new Material
+            {
+                Name = !string.IsNullOrEmpty(flverMat.Name) ? flverMat.Name : $"Material_{materialIndex}"
+            };
+
+            foreach (var tex in flverMat.Textures)
+            {
+                if (string.IsNullOrEmpty(tex.Path))
+                    continue;
+
+                string texFileName = FlverToFbxExporter.GetTextureFileName(tex.Path);
+                var typeUpper = tex.Type?.ToUpper() ?? string.Empty;
+
+                if (typeUpper.Contains("DIFFUSE") || typeUpper.Contains("ALBEDO"))
+                {
+                    mat.TextureDiffuse = new TextureSlot(texFileName,
+                        TextureType.Diffuse, 0, TextureMapping.FromUV,
+                        0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
+                }
+                else if (typeUpper.Contains("BUMPMAP") || typeUpper.Contains("NORMALMAP"))
+                {
+                    mat.TextureNormal = new TextureSlot(texFileName,
+                        TextureType.Normals, 0, TextureMapping.FromUV,
+                        0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
+                }
+                else if (typeUpper.Contains("SPECULAR") || typeUpper.Contains("REFLECTANCE"))
+                {
+                    mat.TextureSpecular = new TextureSlot(texFileName,
+                        TextureType.Specular, 0, TextureMapping.FromUV,
+                        0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
+                }
+                else if (typeUpper.Contains("EMISSIVE"))
+                {
+                    mat.TextureEmissive = new TextureSlot(texFileName,
+                        TextureType.Emissive, 0, TextureMapping.FromUV,
+                        0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
+                }
+            }
+
+            scene.Materials.Add(mat);
+            return mat;
         }
 
         /// <summary>
@@ -372,7 +705,7 @@ namespace DSAnimStudio.Export
         /// </summary>
         private Animation BuildAnimation(HKX.HKASkeleton skeleton,
             HavokAnimationData animData, string animName,
-            List<Node> boneNodes, HKX.HKADefaultAnimatedReferenceFrame rootMotion)
+            HKX.HKADefaultAnimatedReferenceFrame rootMotion)
         {
             var anim = new Animation();
             anim.Name = animName;
@@ -417,15 +750,30 @@ namespace DSAnimStudio.Export
                             translation.Z += rootMotionTransform.Z * scale;
                         }
 
+                        var sourceMatrix = Matrix4x4.CreateScale(
+                                transform.Scale.X,
+                                transform.Scale.Y,
+                                transform.Scale.Z)
+                            * Matrix4x4.CreateFromQuaternion(new Quaternion(
+                                transform.Rotation.X,
+                                transform.Rotation.Y,
+                                transform.Rotation.Z,
+                                transform.Rotation.W))
+                            * Matrix4x4.CreateTranslation(translation);
+
+                        var gltfMatrix = ConvertSourceMatrixToGltf(sourceMatrix);
+                        Matrix4x4.Decompose(gltfMatrix, out var gltfScale, out var gltfRotation, out var gltfTranslation);
+                        gltfRotation = Quaternion.Normalize(gltfRotation);
+
                         channel.PositionKeys.Add(new VectorKey(time, new Vector3D(
-                            translation.X, translation.Y, translation.Z)));
+                            gltfTranslation.X, gltfTranslation.Y, gltfTranslation.Z)));
 
                         channel.RotationKeys.Add(new QuaternionKey(time, new Assimp.Quaternion(
-                            transform.Rotation.W, transform.Rotation.X,
-                            transform.Rotation.Y, transform.Rotation.Z)));
+                            gltfRotation.W, gltfRotation.X,
+                            gltfRotation.Y, gltfRotation.Z)));
 
                         channel.ScalingKeys.Add(new VectorKey(time, new Vector3D(
-                            transform.Scale.X, transform.Scale.Y, transform.Scale.Z)));
+                            gltfScale.X, gltfScale.Y, gltfScale.Z)));
                     }
                     catch
                     {
@@ -462,13 +810,32 @@ namespace DSAnimStudio.Export
             return new Vector3(sample.Vector.X, sample.Vector.Y, sample.Vector.Z);
         }
 
-        private static Assimp.Matrix4x4 ToAssimpMatrix(Matrix4x4 m)
+        private Matrix4x4 ComputeWorldMatrix(IList<FLVER.Node> nodes, int boneIndex)
         {
-            return new Assimp.Matrix4x4(
-                m.M11, m.M21, m.M31, m.M41,
-                m.M12, m.M22, m.M32, m.M42,
-                m.M13, m.M23, m.M33, m.M43,
-                m.M14, m.M24, m.M34, m.M44);
+            float scale = _options.ScaleFactor;
+            var result = Matrix4x4.Identity;
+            int idx = boneIndex;
+
+            while (idx >= 0 && idx < nodes.Count)
+            {
+                var bone = nodes[idx];
+                var s = Matrix4x4.CreateScale(bone.Scale.X, bone.Scale.Y, bone.Scale.Z);
+                var rx = Matrix4x4.CreateRotationX(bone.Rotation.X);
+                var rz = Matrix4x4.CreateRotationZ(bone.Rotation.Z);
+                var ry = Matrix4x4.CreateRotationY(bone.Rotation.Y);
+                var t = Matrix4x4.CreateTranslation(
+                    bone.Translation.X * scale,
+                    bone.Translation.Y * scale,
+                    bone.Translation.Z * scale);
+
+                var localMatrix = s * rx * rz * ry * t;
+                localMatrix = ConvertSourceMatrixToGltf(localMatrix);
+                result *= localMatrix;
+                idx = bone.ParentIndex;
+            }
+
+            return result;
         }
+
     }
 }

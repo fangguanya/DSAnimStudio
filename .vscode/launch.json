@@ -1,0 +1,45 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "SekiroExporter: export-all c1010",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build-sekiro-exporter-release",
+            "program": "${workspaceFolder}/SekiroExporter/bin/Release/net6.0-windows/SekiroExporter.dll",
+            "args": [
+                "export-all",
+                "--game-dir",
+                "C:/Program Files (x86)/Steam/steamapps/common/Sekiro",
+                "--chr",
+                "c1010",
+                "--output",
+                "E:/Sekiro/ExportValidate"
+            ],
+            "cwd": "${workspaceFolder}/SekiroExporter/bin/Release/net6.0-windows",
+            "console": "integratedTerminal",
+            "stopAtEntry": false,
+            "justMyCode": false
+        },
+        {
+            "name": "SekiroExporter: export-model c1010",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build-sekiro-exporter-release",
+            "program": "${workspaceFolder}/SekiroExporter/bin/Release/net6.0-windows/SekiroExporter.dll",
+            "args": [
+                "export-model",
+                "--game-dir",
+                "C:/Program Files (x86)/Steam/steamapps/common/Sekiro",
+                "--chr",
+                "c1010",
+                "--output",
+                "E:/Sekiro/ExportValidate"
+            ],
+            "cwd": "${workspaceFolder}/SekiroExporter/bin/Release/net6.0-windows",
+            "console": "integratedTerminal",
+            "stopAtEntry": false,
+            "justMyCode": false
+        }
+    ]
+}

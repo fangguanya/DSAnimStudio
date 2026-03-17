@@ -4,9 +4,12 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using DSAnimStudio;
 using DSAnimStudio.Export;
+using DSAnimStudio.TaeEditor;
 using SoulsFormats;
 using SoulsAssetPipeline.Animation;
+using SoulsAssetPipeline;
 
 namespace SekiroExporter
 {
@@ -23,6 +26,41 @@ namespace SekiroExporter
     /// </summary>
     class Program
     {
+        [Flags]
+        private enum ExportSections
+        {
+            None = 0,
+            Model = 1,
+            Animations = 2,
+            Textures = 4,
+            Skills = 8,
+            All = Model | Animations | Textures | Skills,
+        }
+
+        private sealed class FormalWeaponRow
+        {
+            public short EquipModelID { get; init; }
+        }
+
+        private sealed class FormalProtectorRow
+        {
+            public short EquipModelID { get; init; }
+            public ParamData.EquipModelGenders EquipModelGender { get; init; }
+            public bool HeadEquip { get; init; }
+            public bool BodyEquip { get; init; }
+            public bool ArmEquip { get; init; }
+            public bool LegEquip { get; init; }
+        }
+
+        private sealed class FormalSekiroEquipTables
+        {
+            public Dictionary<int, FormalWeaponRow> Weapons { get; } = new Dictionary<int, FormalWeaponRow>();
+            public Dictionary<int, FormalProtectorRow> Protectors { get; } = new Dictionary<int, FormalProtectorRow>();
+        }
+
+        private static readonly Dictionary<string, FormalSekiroEquipTables> FormalSekiroEquipTableCache
+            = new Dictionary<string, FormalSekiroEquipTables>(StringComparer.OrdinalIgnoreCase);
+
         static int Main(string[] args)
         {
             Console.WriteLine("=== Sekiro Asset Exporter v1.1 ===");
@@ -83,6 +121,9 @@ namespace SekiroExporter
             Console.WriteLine("  --chr <id>          Character ID (e.g., c0000). If omitted, exports all.");
             Console.WriteLine("  --output <path>     Output directory");
             Console.WriteLine("  --format <png|dds>  Texture format (default: png)");
+            Console.WriteLine("  --model-binder <path> Optional override binder for model export (absolute or relative to game dir)");
+            Console.WriteLine("  --anibnd <path>       Optional override ANIBND for animation/skill export (absolute or relative to game dir)");
+            Console.WriteLine("  --anim <id>           Optional animation clip filter (e.g., a000_200000)");
         }
 
         static Dictionary<string, string> ParseArgs(string[] args)
@@ -122,7 +163,7 @@ namespace SekiroExporter
                     int num = System.Threading.Interlocked.Increment(ref completed);
                     Console.WriteLine($"━━━ [{num}/{chrFiles.Count}] {chrId} ━━━");
 
-                    ExportCharacter(gameDir, chrPath, chrId, chrOutputDir, args);
+                    ExportCharacter(gameDir, chrPath, chrId, chrOutputDir, args, ExportSections.All);
                     Console.WriteLine();
                 }
                 catch (Exception ex)
@@ -139,7 +180,8 @@ namespace SekiroExporter
             return errors > 0 ? 1 : 0;
         }
 
-        static void ExportCharacter(string gameDir, string chrBndPath, string chrId, string outputDir, Dictionary<string, string> args)
+        static void ExportCharacter(string gameDir, string chrBndPath, string chrId, string outputDir,
+            Dictionary<string, string> args, ExportSections sections)
         {
             Directory.CreateDirectory(outputDir);
             string modelDir = Path.Combine(outputDir, "Model");
@@ -156,6 +198,7 @@ namespace SekiroExporter
             var bnd = BND4.Read(chrData);
 
             FLVER2 flver = null;
+            List<FLVER2> overrideFlvers = null;
             HKX skeletonHkx = null;
             List<byte[]> tpfDataList = new List<byte[]>();
 
@@ -163,21 +206,24 @@ namespace SekiroExporter
             {
                 string name = file.Name?.ToLower() ?? "";
 
-                if (name.EndsWith(".flver") || name.EndsWith(".flver.dcx"))
+                if ((sections.HasFlag(ExportSections.Model) || sections.HasFlag(ExportSections.Animations))
+                    && (name.EndsWith(".flver") || name.EndsWith(".flver.dcx")))
                 {
                     byte[] d = file.Bytes;
                     if (DCX.Is(d)) d = DCX.Decompress(d);
                     try { flver = FLVER2.Read(d); }
                     catch (Exception ex) { Console.Error.WriteLine($"  FLVER parse error: {ex.Message}"); }
                 }
-                else if (name.EndsWith(".hkx") && !name.Contains("_c.hkx") && !name.EndsWith(".hkxpwv"))
+                else if ((sections.HasFlag(ExportSections.Model) || sections.HasFlag(ExportSections.Animations))
+                    && name.EndsWith(".hkx") && !name.Contains("_c.hkx") && !name.EndsWith(".hkxpwv"))
                 {
                     // Sekiro skeleton HKX: named "{chrId}.HKX" (NOT "{chrId}_c.hkx" which is collision)
                     byte[] d = file.Bytes;
                     if (DCX.Is(d)) d = DCX.Decompress(d);
                     skeletonHkx = TryReadHkx(d, file.Name);
                 }
-                else if (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx"))
+                else if (sections.HasFlag(ExportSections.Textures)
+                    && (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx")))
                 {
                     byte[] d = file.Bytes;
                     if (DCX.Is(d)) d = DCX.Decompress(d);
@@ -186,12 +232,34 @@ namespace SekiroExporter
             }
 
             Console.WriteLine($"  CHRBND: FLVER={flver != null} (nodes={flver?.Nodes?.Count}, meshes={flver?.Meshes?.Count}), Skeleton={skeletonHkx != null}, TPFs={tpfDataList.Count}");
+            var modelBinderPaths = (sections.HasFlag(ExportSections.Model) || sections.HasFlag(ExportSections.Animations))
+                ? ResolveFormalModelBinderPaths(gameDir, chrId, args)
+                : new List<string>();
+            if (modelBinderPaths.Count > 0)
+            {
+                try
+                {
+                    overrideFlvers = modelBinderPaths
+                        .Select(TryReadFirstFlverFromBinder)
+                        .Where(f => f != null)
+                        .ToList();
+
+                    if (overrideFlvers.Count > 0)
+                        flver = overrideFlvers[0];
+
+                    Console.WriteLine($"  MODEL ASSEMBLY: {string.Join(", ", modelBinderPaths.Select(Path.GetFileName))} -> FLVERs={overrideFlvers.Count}, meshes={overrideFlvers.Sum(f => f.Meshes?.Count ?? 0)}");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  MODEL ASSEMBLY error: {ex.Message}");
+                }
+            }
 
             // ═══════════════════════════════════════════
             // 2. Load TEXBND → textures (separate file)
             // ═══════════════════════════════════════════
             string texbndPath = Path.Combine(chrDir, $"{chrId}.texbnd.dcx");
-            if (File.Exists(texbndPath))
+            if (sections.HasFlag(ExportSections.Textures) && File.Exists(texbndPath))
             {
                 try
                 {
@@ -222,10 +290,14 @@ namespace SekiroExporter
             // ═══════════════════════════════════════════
             TAE tae = null;
             string anibndPath = Path.Combine(chrDir, $"{chrId}.anibnd.dcx");
+            string overrideAnibnd = args.GetValueOrDefault("anibnd");
+            if (!string.IsNullOrWhiteSpace(overrideAnibnd))
+                anibndPath = ResolveGamePath(gameDir, overrideAnibnd);
             byte[] anibndRawBytes = null;
             byte[] compendiumBytes = null;
 
-            if (File.Exists(anibndPath))
+            if ((sections.HasFlag(ExportSections.Animations) || sections.HasFlag(ExportSections.Skills))
+                && File.Exists(anibndPath))
             {
                 try
                 {
@@ -259,6 +331,7 @@ namespace SekiroExporter
                         }
                     }
                     Console.WriteLine($"  ANIBND: TAE={tae != null} (anims={tae?.Animations?.Count}), HKX anims={hkxCount}, Compendium={compendiumBytes != null}");
+                    Console.WriteLine($"  ANIBND: {Path.GetFileName(anibndPath)} TAE={tae != null} (anims={tae?.Animations?.Count}), HKX anims={hkxCount}, Compendium={compendiumBytes != null}");
                 }
                 catch (Exception ex)
                 {
@@ -269,20 +342,25 @@ namespace SekiroExporter
             // ═══════════════════════════════════════════
             // 4. Export model (DAE/Collada)
             // ═══════════════════════════════════════════
-            if (flver != null && flver.Meshes.Count > 0)
+            var modelFlvers = overrideFlvers?.Count > 0 ? overrideFlvers : (flver != null ? new List<FLVER2> { flver } : null);
+            if (sections.HasFlag(ExportSections.Model)
+                && modelFlvers != null && modelFlvers.Any(f => f?.Meshes != null && f.Meshes.Count > 0))
             {
                 Directory.CreateDirectory(modelDir);
                 string modelPath = Path.Combine(modelDir, $"{chrId}.fbx");
                 try
                 {
                     var fbxExporter = new FlverToFbxExporter();
-                    fbxExporter.Export(flver, modelPath);
+                    if (modelFlvers.Count > 1 || overrideFlvers?.Count > 0)
+                        fbxExporter.Export(modelFlvers, skeletonHkx, modelPath);
+                    else
+                        fbxExporter.Export(modelFlvers[0], modelPath);
                     // Check for the actual output file (format may have fallen back to .gltf/.glb/.dae)
-                    string actualModelFile = FindExportedFile(modelDir, chrId, new[] { ".fbx", ".gltf", ".glb", ".dae" });
+                    string actualModelFile = FindExportedFile(modelDir, chrId, new[] { ".fbx", ".gltf", ".glb" });
                     if (actualModelFile != null)
                         Console.WriteLine($"  ✓ Model: {Path.GetFileName(actualModelFile)} ({new FileInfo(actualModelFile).Length / 1024}KB)");
                     else
-                        Console.Error.WriteLine($"  ✗ Model: export returned but file missing!");
+                        Console.Error.WriteLine($"  ✗ Model: no formal model deliverable produced (.fbx/.gltf/.glb)");
                 }
                 catch (Exception ex)
                 {
@@ -294,7 +372,7 @@ namespace SekiroExporter
                 {
                     var matExporter = new MaterialManifestExporter();
                     string matPath = Path.Combine(modelDir, "material_manifest.json");
-                    matExporter.ExportToFile(flver, matPath);
+                    matExporter.ExportToFile(modelFlvers, matPath);
                     Console.WriteLine($"  ✓ Material manifest exported");
                 }
                 catch (Exception ex)
@@ -302,7 +380,7 @@ namespace SekiroExporter
                     Console.Error.WriteLine($"  ✗ Material manifest error: {ex.Message}");
                 }
             }
-            else if (flver != null)
+            else if (modelFlvers != null && modelFlvers.Count > 0)
             {
                 Console.WriteLine($"  - Model: skipped (0 meshes, parts may be in separate files)");
             }
@@ -310,7 +388,7 @@ namespace SekiroExporter
             // ═══════════════════════════════════════════
             // 5. Export textures
             // ═══════════════════════════════════════════
-            if (tpfDataList.Count > 0)
+            if (sections.HasFlag(ExportSections.Textures) && tpfDataList.Count > 0)
             {
                 Directory.CreateDirectory(texDir);
                 var texExporter = new TextureExporter(new TextureExporter.ExportOptions
@@ -342,14 +420,15 @@ namespace SekiroExporter
             // ═══════════════════════════════════════════
             // 6. Export animations from ANIBND
             // ═══════════════════════════════════════════
-            if (anibndRawBytes != null && skeletonHkx != null)
+            if (sections.HasFlag(ExportSections.Animations) && anibndRawBytes != null && skeletonHkx != null)
             {
                 Directory.CreateDirectory(animDir);
                 var animExporter = new AnimationToFbxExporter();
+                string animFilter = args.GetValueOrDefault("anim");
 
                 try
                 {
-                    animExporter.ExportAnibnd(anibndRawBytes, skeletonHkx, animDir,
+                    animExporter.ExportAnibnd(anibndRawBytes, skeletonHkx, animDir, modelFlvers, animFilter,
                         (name, cur, total) =>
                         {
                             if (cur % 20 == 0 || cur == total)
@@ -357,12 +436,10 @@ namespace SekiroExporter
                         });
                     Console.WriteLine();
 
-                    // Post-process: merge per-bone glTF animations into single clips
-                    int mergedCount = GltfAnimationMerger.MergeAllInDirectory(animDir);
                     int animCount = Directory.GetFiles(animDir, "*.gltf").Length
                         + Directory.GetFiles(animDir, "*.fbx").Length
-                        + Directory.GetFiles(animDir, "*.dae").Length;
-                    Console.WriteLine($"  ✓ Animations: {animCount} clips exported ({mergedCount} glTF merged)");
+                        + Directory.GetFiles(animDir, "*.glb").Length;
+                    Console.WriteLine($"  ✓ Animations: {animCount} formal clips exported");
                 }
                 catch (Exception ex)
                 {
@@ -377,7 +454,7 @@ namespace SekiroExporter
             // ═══════════════════════════════════════════
             // 7. Export skill config (TAE events)
             // ═══════════════════════════════════════════
-            if (tae != null)
+            if (sections.HasFlag(ExportSections.Skills) && tae != null)
             {
                 Directory.CreateDirectory(skillDir);
                 var skillExporter = new SkillConfigExporter();
@@ -467,23 +544,41 @@ namespace SekiroExporter
             string chrId = GetRequired(args, "chr");
 
             string chrBndPath = FindChrBnd(gameDir, chrId);
-            ExportCharacter(gameDir, chrBndPath, chrId, output, args);
+            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Model);
             return 0;
         }
 
         static int RunExportAnims(Dictionary<string, string> args)
         {
-            return RunExportModel(args);
+            string gameDir = GetRequired(args, "game-dir");
+            string output = GetRequired(args, "output");
+            string chrId = GetRequired(args, "chr");
+
+            string chrBndPath = FindChrBnd(gameDir, chrId);
+            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Animations);
+            return 0;
         }
 
         static int RunExportTextures(Dictionary<string, string> args)
         {
-            return RunExportModel(args);
+            string gameDir = GetRequired(args, "game-dir");
+            string output = GetRequired(args, "output");
+            string chrId = GetRequired(args, "chr");
+
+            string chrBndPath = FindChrBnd(gameDir, chrId);
+            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Textures);
+            return 0;
         }
 
         static int RunExportSkills(Dictionary<string, string> args)
         {
-            return RunExportModel(args);
+            string gameDir = GetRequired(args, "game-dir");
+            string output = GetRequired(args, "output");
+            string chrId = GetRequired(args, "chr");
+
+            string chrBndPath = FindChrBnd(gameDir, chrId);
+            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Skills);
+            return 0;
         }
 
         static List<string> ScanCharacters(string gameDir, string chrFilter)
@@ -526,6 +621,391 @@ namespace SekiroExporter
             int converted = DaeToFbxConverter.ConvertDirectory(dir, delete);
             Console.WriteLine($"Done. {converted} files converted.");
             return 0;
+        }
+        static FLVER2 TryReadFirstFlverFromBinder(string binderPath)
+        {
+            if (!File.Exists(binderPath))
+                throw new FileNotFoundException($"Model binder not found: {binderPath}");
+
+            byte[] binderData = File.ReadAllBytes(binderPath);
+            if (DCX.Is(binderData)) binderData = DCX.Decompress(binderData);
+            var bnd = BND4.Read(binderData);
+
+            foreach (var file in bnd.Files)
+            {
+                string name = file.Name?.ToLower() ?? "";
+                if (!name.EndsWith(".flver") && !name.EndsWith(".flver.dcx"))
+                    continue;
+
+                byte[] flverData = file.Bytes;
+                if (DCX.Is(flverData)) flverData = DCX.Decompress(flverData);
+                return FLVER2.Read(flverData);
+            }
+
+            return null;
+        }
+
+        static string ResolveGamePath(string gameDir, string path)
+        {
+            if (Path.IsPathRooted(path))
+                return path;
+
+            return Path.Combine(gameDir, path);
+        }
+
+        static IEnumerable<string> SplitOverridePaths(string rawPaths)
+        {
+            return (rawPaths ?? "")
+                .Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(path => path.Trim())
+                .Where(path => path.Length > 0);
+        }
+
+        static List<string> ResolveFormalModelBinderPaths(string gameDir, string chrId, Dictionary<string, string> args)
+        {
+            string overrideModelBinder = args.GetValueOrDefault("model-binder");
+            if (!string.IsNullOrWhiteSpace(overrideModelBinder))
+            {
+                return SplitOverridePaths(overrideModelBinder)
+                    .Select(path => ResolveGamePath(gameDir, path))
+                    .ToList();
+            }
+
+            if (chrId.Equals("c0000", StringComparison.OrdinalIgnoreCase))
+                return ResolveFormalSekiroPlayerModelBinderPaths(gameDir, GetFormalSekiroExportAssemblyConfig(chrId), isFemale: false).ToList();
+
+            return new List<string>();
+        }
+
+        static NewChrAsmCfgJson GetFormalSekiroExportAssemblyConfig(string chrId)
+        {
+            if (!chrId.Equals("c0000", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            return new NewChrAsmCfgJson
+            {
+                GameType = SoulsGames.SDT,
+                IsFemale = false,
+                EquipIDs = new Dictionary<NewChrAsm.EquipSlotTypes, int>
+                {
+                    { NewChrAsm.EquipSlotTypes.Head, 304000 },
+                    { NewChrAsm.EquipSlotTypes.Body, 901000 },
+                    { NewChrAsm.EquipSlotTypes.Arms, 102000 },
+                    { NewChrAsm.EquipSlotTypes.Legs, 103000 },
+                    { NewChrAsm.EquipSlotTypes.RightWeapon, 75000 },
+                    { NewChrAsm.EquipSlotTypes.SekiroGrapplingHook, 9500000 },
+                },
+                DirectEquipInfos = new Dictionary<NewChrAsm.EquipSlotTypes, NewEquipSlot_Armor.DirectEquipInfo>
+                {
+                    {
+                        NewChrAsm.EquipSlotTypes.Face,
+                        new NewEquipSlot_Armor.DirectEquipInfo
+                        {
+                            PartPrefix = NewEquipSlot_Armor.DirectEquipPartPrefix.FC,
+                            Gender = NewEquipSlot_Armor.DirectEquipGender.UnisexUseMForBoth,
+                            ModelID = 200,
+                        }
+                    },
+                },
+            };
+        }
+
+        static IEnumerable<string> ResolveFormalSekiroPlayerModelBinderPaths(string gameDir, NewChrAsmCfgJson config, bool isFemale)
+        {
+            string partsDir = Path.Combine(gameDir, "parts");
+            if (!Directory.Exists(partsDir))
+                throw new DirectoryNotFoundException($"Sekiro parts directory not found: {partsDir}");
+
+            if (config == null)
+                throw new InvalidOperationException("Formal Sekiro export assembly configuration is missing.");
+
+            var equipTables = LoadFormalSekiroEquipTables(gameDir);
+            var requiredBinderPaths = new List<string>();
+
+            foreach (var slot in new[]
+            {
+                NewChrAsm.EquipSlotTypes.Head,
+                NewChrAsm.EquipSlotTypes.Face,
+                NewChrAsm.EquipSlotTypes.Body,
+                NewChrAsm.EquipSlotTypes.Arms,
+                NewChrAsm.EquipSlotTypes.Legs,
+                NewChrAsm.EquipSlotTypes.RightWeapon,
+                NewChrAsm.EquipSlotTypes.LeftWeapon,
+                NewChrAsm.EquipSlotTypes.SekiroMortalBlade,
+                NewChrAsm.EquipSlotTypes.SekiroGrapplingHook,
+            })
+            {
+                string binderFileName = ResolveFormalSekiroPartBinderFileName(partsDir, equipTables, config, slot, isFemale, config.CurrentPartSuffixType);
+                if (string.IsNullOrWhiteSpace(binderFileName))
+                    continue;
+
+                requiredBinderPaths.Add(Path.Combine(partsDir, binderFileName));
+            }
+
+            return requiredBinderPaths
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        static string ResolveFormalSekiroPartBinderFileName(
+            string partsDir,
+            FormalSekiroEquipTables equipTables,
+            NewChrAsmCfgJson config,
+            NewChrAsm.EquipSlotTypes slot,
+            bool isFemale,
+            ParamData.PartSuffixType suffixType)
+        {
+            if (config.DirectEquipInfos.TryGetValue(slot, out var directEquipInfo))
+                return ResolveDirectEquipBinderFileName(partsDir, directEquipInfo, isFemale, suffixType, slot);
+
+            if (!config.EquipIDs.TryGetValue(slot, out int equipId) || equipId < 0)
+                return null;
+
+            if (slot is NewChrAsm.EquipSlotTypes.RightWeapon
+                or NewChrAsm.EquipSlotTypes.LeftWeapon
+                or NewChrAsm.EquipSlotTypes.SekiroMortalBlade
+                or NewChrAsm.EquipSlotTypes.SekiroGrapplingHook)
+            {
+                if (!equipTables.Weapons.TryGetValue(equipId, out var weaponRow))
+                    throw new InvalidOperationException($"Formal EquipParamWeapon row {equipId} not found for slot {slot}.");
+
+                string fileName = $"WP_A_{weaponRow.EquipModelID:D4}.partsbnd.dcx";
+                EnsureFormalBinderExists(partsDir, fileName, slot, equipId);
+                return fileName;
+            }
+
+            if (!equipTables.Protectors.TryGetValue(equipId, out var protectorRow))
+                throw new InvalidOperationException($"Formal EquipParamProtector row {equipId} not found for slot {slot}.");
+
+            string protectorFileName = ResolveProtectorBinderFileName(partsDir, protectorRow, isFemale, suffixType, slot, equipId);
+            EnsureFormalBinderExists(partsDir, protectorFileName, slot, equipId);
+            return protectorFileName;
+        }
+
+        static string ResolveDirectEquipBinderFileName(
+            string partsDir,
+            NewEquipSlot_Armor.DirectEquipInfo directEquipInfo,
+            bool isFemale,
+            ParamData.PartSuffixType suffixType,
+            NewChrAsm.EquipSlotTypes slot)
+        {
+            string prefix = directEquipInfo.PartPrefix == NewEquipSlot_Armor.DirectEquipPartPrefix.None
+                ? GetArmorSlotPrefix(slot)
+                : directEquipInfo.PartPrefix.ToString();
+
+            if (string.IsNullOrWhiteSpace(prefix) || directEquipInfo.ModelID < 0)
+                throw new InvalidOperationException($"Formal direct-equip configuration is incomplete for slot {slot}.");
+
+            string suffix = GetPartSuffixLiteral(suffixType);
+            string genderSegment = directEquipInfo.Gender switch
+            {
+                NewEquipSlot_Armor.DirectEquipGender.UnisexUseA => "A",
+                NewEquipSlot_Armor.DirectEquipGender.MaleOnlyUseM => "M",
+                NewEquipSlot_Armor.DirectEquipGender.UnisexUseMForBoth => "M",
+                NewEquipSlot_Armor.DirectEquipGender.FemaleOnlyUseF => "F",
+                NewEquipSlot_Armor.DirectEquipGender.BothGendersUseMF => isFemale ? "F" : "M",
+                _ => throw new InvalidOperationException($"Unsupported formal direct-equip gender '{directEquipInfo.Gender}' for slot {slot}."),
+            };
+
+            string candidate = $"{prefix}_{genderSegment}_{directEquipInfo.ModelID:D4}{suffix}.partsbnd.dcx";
+            if (File.Exists(Path.Combine(partsDir, candidate)))
+                return candidate;
+
+            if (suffixType != ParamData.PartSuffixType.M)
+            {
+                string unsuffixed = $"{prefix}_{genderSegment}_{directEquipInfo.ModelID:D4}.partsbnd.dcx";
+                if (File.Exists(Path.Combine(partsDir, unsuffixed)))
+                    return unsuffixed;
+            }
+
+            throw new FileNotFoundException($"Formal direct-equip parts binder not found for slot {slot}: {candidate}");
+        }
+
+        static string ResolveProtectorBinderFileName(
+            string partsDir,
+            FormalProtectorRow protectorRow,
+            bool isFemale,
+            ParamData.PartSuffixType suffixType,
+            NewChrAsm.EquipSlotTypes slot,
+            int equipId)
+        {
+            string prefix = GetProtectorPrefix(protectorRow, slot, equipId);
+            string suffix = GetPartSuffixLiteral(suffixType);
+            string genderSegment = protectorRow.EquipModelGender switch
+            {
+                ParamData.EquipModelGenders.UnisexUseA => "A",
+                ParamData.EquipModelGenders.MaleOnlyUseM => "M",
+                ParamData.EquipModelGenders.UnisexUseMForBoth => "M",
+                ParamData.EquipModelGenders.FemaleOnlyUseF => "F",
+                ParamData.EquipModelGenders.BothGendersUseMF => isFemale ? "F" : "M",
+                _ => throw new InvalidOperationException($"Unsupported formal protector gender '{protectorRow.EquipModelGender}' for equip ID {equipId} ({slot})."),
+            };
+
+            string candidate = $"{prefix}_{genderSegment}_{protectorRow.EquipModelID:D4}{suffix}.partsbnd.dcx";
+            if (File.Exists(Path.Combine(partsDir, candidate)))
+                return candidate;
+
+            if (suffixType != ParamData.PartSuffixType.M)
+            {
+                string unsuffixed = $"{prefix}_{genderSegment}_{protectorRow.EquipModelID:D4}.partsbnd.dcx";
+                if (File.Exists(Path.Combine(partsDir, unsuffixed)))
+                    return unsuffixed;
+            }
+
+            throw new FileNotFoundException($"Formal protector parts binder not found for equip ID {equipId} ({slot}): {candidate}");
+        }
+
+        static FormalSekiroEquipTables LoadFormalSekiroEquipTables(string gameDir)
+        {
+            string normalizedGameDir = Path.GetFullPath(gameDir);
+            if (FormalSekiroEquipTableCache.TryGetValue(normalizedGameDir, out var cached))
+                return cached;
+
+            string paramBinderPath = Path.Combine(normalizedGameDir, "param", "gameparam", "gameparam.parambnd.dcx");
+            if (!File.Exists(paramBinderPath))
+                throw new FileNotFoundException($"Formal Sekiro gameparam binder not found: {paramBinderPath}");
+
+            byte[] paramBinderBytes = File.ReadAllBytes(paramBinderPath);
+            if (DCX.Is(paramBinderBytes))
+                paramBinderBytes = DCX.Decompress(paramBinderBytes);
+
+            var paramBinder = BND4.Read(paramBinderBytes);
+            var result = new FormalSekiroEquipTables();
+            ReadFormalWeaponRows(paramBinder, result.Weapons);
+            ReadFormalProtectorRows(paramBinder, result.Protectors);
+
+            FormalSekiroEquipTableCache[normalizedGameDir] = result;
+            return result;
+        }
+
+        static void ReadFormalWeaponRows(BND4 paramBinder, Dictionary<int, FormalWeaponRow> destination)
+        {
+            var param = ReadParamHackFromBinder(paramBinder, "EquipParamWeapon");
+            try
+            {
+                foreach (var row in param.Rows)
+                {
+                    var reader = param.GetRowReader(row);
+                    long start = reader.Position;
+                    reader.ReadInt32();
+                    reader.Position = start + 0xB8;
+                    short equipModelId = reader.ReadInt16();
+                    destination[row.ID] = new FormalWeaponRow { EquipModelID = equipModelId };
+                }
+            }
+            finally
+            {
+                param.DisposeRowReader();
+            }
+        }
+
+        static void ReadFormalProtectorRows(BND4 paramBinder, Dictionary<int, FormalProtectorRow> destination)
+        {
+            var param = ReadParamHackFromBinder(paramBinder, "EquipParamProtector");
+            try
+            {
+                foreach (var row in param.Rows)
+                {
+                    var reader = param.GetRowReader(row);
+                    long start = reader.Position;
+                    reader.Position = start + 0xA0;
+                    short equipModelId = reader.ReadInt16();
+
+                    reader.Position = start + 0xD1;
+                    var gender = (ParamData.EquipModelGenders)reader.ReadByte();
+
+                    reader.Position = start + 0xD8;
+                    var firstBitmask = ReadBitmask(reader, 5);
+
+                    destination[row.ID] = new FormalProtectorRow
+                    {
+                        EquipModelID = equipModelId,
+                        EquipModelGender = gender,
+                        HeadEquip = firstBitmask[1],
+                        BodyEquip = firstBitmask[2],
+                        ArmEquip = firstBitmask[3],
+                        LegEquip = firstBitmask[4],
+                    };
+                }
+            }
+            finally
+            {
+                param.DisposeRowReader();
+            }
+        }
+
+        static PARAM_Hack ReadParamHackFromBinder(BND4 paramBinder, string paramName)
+        {
+            var binderFile = paramBinder.Files.FirstOrDefault(file =>
+                file.Name != null && file.Name.IndexOf(paramName, StringComparison.OrdinalIgnoreCase) >= 0);
+            if (binderFile == null)
+                throw new InvalidOperationException($"Formal param '{paramName}' not found in Sekiro gameparam binder.");
+
+            byte[] paramBytes = binderFile.Bytes;
+            if (DCX.Is(paramBytes))
+                paramBytes = DCX.Decompress(paramBytes);
+
+            return PARAM_Hack.Read(paramBytes);
+        }
+
+        static List<bool> ReadBitmask(BinaryReaderEx reader, int bitCount)
+        {
+            var result = new List<bool>(bitCount);
+            byte[] bytes = reader.ReadBytes((int)Math.Ceiling(bitCount / 8.0));
+            for (int i = 0; i < bitCount; i++)
+                result.Add((bytes[i / 8] & (1 << (i % 8))) != 0);
+            return result;
+        }
+
+        static string GetProtectorPrefix(FormalProtectorRow protectorRow, NewChrAsm.EquipSlotTypes slot, int equipId)
+        {
+            int enabledSlotCount = (protectorRow.HeadEquip ? 1 : 0)
+                + (protectorRow.BodyEquip ? 1 : 0)
+                + (protectorRow.ArmEquip ? 1 : 0)
+                + (protectorRow.LegEquip ? 1 : 0);
+
+            if (enabledSlotCount != 1)
+                throw new InvalidOperationException($"Formal protector row {equipId} for slot {slot} must map to exactly one armor prefix.");
+
+            if (protectorRow.HeadEquip)
+                return "HD";
+            if (protectorRow.BodyEquip)
+                return "BD";
+            if (protectorRow.ArmEquip)
+                return "AM";
+            return "LG";
+        }
+
+        static string GetArmorSlotPrefix(NewChrAsm.EquipSlotTypes slot)
+        {
+            return slot switch
+            {
+                NewChrAsm.EquipSlotTypes.Head => "HD",
+                NewChrAsm.EquipSlotTypes.Body => "BD",
+                NewChrAsm.EquipSlotTypes.Arms => "AM",
+                NewChrAsm.EquipSlotTypes.Legs => "LG",
+                NewChrAsm.EquipSlotTypes.Face => "FC",
+                NewChrAsm.EquipSlotTypes.Hair => "HR",
+                _ => null,
+            };
+        }
+
+        static string GetPartSuffixLiteral(ParamData.PartSuffixType suffixType)
+        {
+            return suffixType switch
+            {
+                ParamData.PartSuffixType.M => "_M",
+                ParamData.PartSuffixType.L => "_L",
+                ParamData.PartSuffixType.U => "_U",
+                _ => string.Empty,
+            };
+        }
+
+        static void EnsureFormalBinderExists(string partsDir, string fileName, NewChrAsm.EquipSlotTypes slot, int equipId)
+        {
+            string fullPath = Path.Combine(partsDir, fileName);
+            if (!File.Exists(fullPath))
+                throw new FileNotFoundException($"Formal parts binder not found for slot {slot}, equip ID {equipId}: {fullPath}");
         }
 
         /// <summary>Find the actual exported file, checking multiple possible extensions.</summary>
