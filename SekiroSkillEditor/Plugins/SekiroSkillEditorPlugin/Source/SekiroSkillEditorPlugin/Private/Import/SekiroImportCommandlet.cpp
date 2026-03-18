@@ -550,6 +550,24 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			ExportDir / TEXT("Textures"),
 			ChrContent);
 		UE_LOG(LogTemp, Display, TEXT("  Materials: %d"), MaterialInstances.Num());
+
+		// Bind MI_* to SkeletalMesh slots
+		if (Skeleton)
+		{
+			FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+			TArray<FAssetData> MeshAssets;
+			AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Mesh"))), MeshAssets, true);
+			for (const FAssetData& AssetData : MeshAssets)
+			{
+				if (USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(AssetData.GetAsset()))
+				{
+					USekiroMaterialSetup::BindMaterialsToSkeletalMesh(SkelMesh, MaterialManifestFiles[0], ChrContent);
+					SavePackage(SkelMesh);
+					break;
+				}
+			}
+		}
 	}
 	else
 	{

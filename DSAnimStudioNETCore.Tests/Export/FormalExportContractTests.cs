@@ -240,4 +240,140 @@ namespace DSAnimStudioNETCore.Tests.Export
             Assert.That(track.Samples[1].YawRadians, Is.EqualTo(0.25f).Within(0.0001f));
         }
     }
+
+    [TestFixture]
+    public class MaterialManifestExporterTests
+    {
+        [Test]
+        public void MaterialManifestExporter_TextureBindingsIsJObjectNotArray()
+        {
+            var flver = CreateTestFlver();
+            var exporter = new MaterialManifestExporter();
+            var manifest = exporter.GenerateManifest(flver, ".png");
+            var materials = manifest["materials"] as JArray;
+            Assert.That(materials, Is.Not.Null);
+            Assert.That(materials.Count, Is.GreaterThan(0));
+            var firstMat = materials[0] as JObject;
+            Assert.That(firstMat, Is.Not.Null);
+            var textureBindings = firstMat["textureBindings"];
+            Assert.That(textureBindings, Is.TypeOf<JObject>(), "textureBindings should be JObject (dictionary), not JArray");
+        }
+
+        [Test]
+        public void MaterialManifestExporter_TextureBindingsKeysAreParameterNames()
+        {
+            var flver = CreateTestFlver();
+            var exporter = new MaterialManifestExporter();
+            var manifest = exporter.GenerateManifest(flver, ".png");
+            var materials = manifest["materials"] as JArray;
+            var firstMat = materials[0] as JObject;
+            var textureBindings = firstMat["textureBindings"] as JObject;
+            Assert.That(textureBindings, Is.Not.Null);
+            foreach (var binding in textureBindings.Properties())
+            {
+                var paramNames = new[] { "BaseColor", "Normal", "Specular", "Emissive", "Roughness", "BlendMask", "" };
+                Assert.That(paramNames, Contains.Item(binding.Name), 
+                    $"Key '{binding.Name}' should be a valid parameter name");
+            }
+        }
+
+        [Test]
+        public void MaterialManifestExporter_TextureBindingsContainsRequiredFields()
+        {
+            var flver = CreateTestFlver();
+            var exporter = new MaterialManifestExporter();
+            var manifest = exporter.GenerateManifest(flver, ".png");
+            var materials = manifest["materials"] as JArray;
+            var firstMat = materials[0] as JObject;
+            var textureBindings = firstMat["textureBindings"] as JObject;
+            Assert.That(textureBindings, Is.Not.Null);
+            foreach (var binding in textureBindings.Properties())
+            {
+                var texInfo = binding.Value as JObject;
+                Assert.That(texInfo, Is.Not.Null);
+                Assert.That(texInfo["slotType"], Is.Not.Null, "slotType is required");
+                Assert.That(texInfo["exportedFileName"], Is.Not.Null, "exportedFileName is required");
+                Assert.That(texInfo["relativePath"], Is.Not.Null, "relativePath is required");
+                Assert.That(texInfo["colorSpace"], Is.Not.Null, "colorSpace is required");
+            }
+        }
+
+        [Test]
+        public void MaterialManifestExporter_MaterialInstanceKeyFormat()
+        {
+            var flver = CreateTestFlver();
+            var exporter = new MaterialManifestExporter();
+            var manifest = exporter.GenerateManifest(flver, ".png");
+            var materials = manifest["materials"] as JArray;
+            var firstMat = materials[0] as JObject;
+            var materialInstanceKey = (string)firstMat["materialInstanceKey"];
+            Assert.That(materialInstanceKey, Is.Not.Null);
+            Assert.That(materialInstanceKey, Does.StartWith("MI_"), "materialInstanceKey should start with MI_");
+        }
+
+        [Test]
+        public void MaterialManifestExporter_MultipleTexturesPerMaterial()
+        {
+            var flver = CreateMultiTextureFlver();
+            var exporter = new MaterialManifestExporter();
+            var manifest = exporter.GenerateManifest(flver, ".png");
+            var materials = manifest["materials"] as JArray;
+            var firstMat = materials[0] as JObject;
+            var textureBindings = firstMat["textureBindings"] as JObject;
+            Assert.That(textureBindings, Is.Not.Null);
+            Assert.That(textureBindings.Count, Is.GreaterThanOrEqualTo(2), "Should have multiple texture bindings");
+        }
+
+        private static SoulsFormats.FLVER2 CreateTestFlver()
+        {
+            var flver = new SoulsFormats.FLVER2();
+            flver.Materials.Add(new SoulsFormats.FLVER2.Material
+            {
+                Name = "TestMaterial",
+                MTD = "Test.mtd",
+                Textures = new List<SoulsFormats.FLVER2.Texture>
+                {
+                    new SoulsFormats.FLVER2.Texture
+                    {
+                        Type = "g_Diffuse",
+                        Path = @"N:\SPRJ\data\Model\chr\c0000\c0000_a.tga"
+                    }
+                }
+            });
+            flver.Meshes.Add(new SoulsFormats.FLVER2.Mesh());
+            flver.Meshes[0].MaterialIndex = 0;
+            return flver;
+        }
+
+        private static SoulsFormats.FLVER2 CreateMultiTextureFlver()
+        {
+            var flver = new SoulsFormats.FLVER2();
+            flver.Materials.Add(new SoulsFormats.FLVER2.Material
+            {
+                Name = "TestMaterial",
+                MTD = "Test.mtd",
+                Textures = new List<SoulsFormats.FLVER2.Texture>
+                {
+                    new SoulsFormats.FLVER2.Texture
+                    {
+                        Type = "g_Diffuse",
+                        Path = @"N:\SPRJ\data\Model\chr\c0000\c0000_a.tga"
+                    },
+                    new SoulsFormats.FLVER2.Texture
+                    {
+                        Type = "g_Bumpmap",
+                        Path = @"N:\SPRJ\data\Model\chr\c0000\c0000_n.tga"
+                    },
+                    new SoulsFormats.FLVER2.Texture
+                    {
+                        Type = "g_Specular",
+                        Path = @"N:\SPRJ\data\Model\chr\c0000\c0000_s.tga"
+                    }
+                }
+            });
+            flver.Meshes.Add(new SoulsFormats.FLVER2.Mesh());
+            flver.Meshes[0].MaterialIndex = 0;
+            return flver;
+        }
+    }
 }

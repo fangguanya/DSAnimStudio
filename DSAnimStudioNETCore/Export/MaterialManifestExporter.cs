@@ -170,15 +170,25 @@ namespace DSAnimStudio.Export
             foreach (JObject textureEntry in BuildTextureArray(mat, textureFileExtension).OfType<JObject>())
             {
                 string parameterName = (string)textureEntry["parameterName"];
+                string slotType = (string)textureEntry["slotType"];
+                string textureType = (string)textureEntry["type"] ?? "";
+                
+                // For unknown types, use the original texture type as parameter name
+                if (string.IsNullOrWhiteSpace(parameterName) && !string.IsNullOrWhiteSpace(textureType))
+                {
+                    parameterName = textureType;
+                }
+                
                 if (string.IsNullOrWhiteSpace(parameterName) || bindings.ContainsKey(parameterName))
                     continue;
 
                 bindings[parameterName] = new JObject
                 {
-                    ["slotType"] = (string)textureEntry["slotType"] ?? string.Empty,
+                    ["slotType"] = slotType ?? string.Empty,
                     ["exportedFileName"] = (string)textureEntry["exportedFileName"] ?? string.Empty,
                     ["relativePath"] = (string)textureEntry["relativePath"] ?? string.Empty,
                     ["colorSpace"] = (string)textureEntry["colorSpace"] ?? string.Empty,
+                    ["textureType"] = textureType,
                 };
             }
 
