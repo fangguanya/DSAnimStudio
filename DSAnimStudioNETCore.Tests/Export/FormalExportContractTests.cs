@@ -3,7 +3,9 @@ using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SoulsAssetPipeline.Animation;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
+using System.Reflection;
 
 namespace DSAnimStudioNETCore.Tests.Export
 {
@@ -24,6 +26,53 @@ namespace DSAnimStudioNETCore.Tests.Export
             {
                 return NewBlendableTransform.Identity;
             }
+        }
+
+        private static HKX.HKASkeleton CreateSingleBoneSkeleton()
+        {
+            return new HKX.HKASkeleton
+            {
+                Bones = new HKX.HKArray<HKX.Bone>(new HKX.HKArrayData<HKX.Bone>
+                {
+                    Elements = new List<HKX.Bone>
+                    {
+                        new HKX.Bone { Name = new HKX.HKCString("Master") },
+                    },
+                }),
+                ParentIndices = new HKX.HKArray<HKX.HKShort>(new HKX.HKArrayData<HKX.HKShort>
+                {
+                    Elements = new List<HKX.HKShort>
+                    {
+                        new HKX.HKShort(-1),
+                    },
+                }),
+                Transforms = new HKX.HKArray<HKX.Transform>(new HKX.HKArrayData<HKX.Transform>
+                {
+                    Elements = new List<HKX.Transform>
+                    {
+                        new HKX.Transform
+                        {
+                            Position = new HKX.HKVector4(new Vector4(0, 0, 0, 0)),
+                            Rotation = new HKX.HKVector4(new Vector4(0, 0, 0, 1)),
+                            Scale = new HKX.HKVector4(new Vector4(1, 1, 1, 0)),
+                        },
+                    },
+                }),
+            };
+        }
+
+        private static HKX.HKADefaultAnimatedReferenceFrame CreateReferenceFrame(params Vector4[] frames)
+        {
+            return new HKX.HKADefaultAnimatedReferenceFrame
+            {
+                Up = new Vector4(0, 1, 0, 0),
+                Forward = new Vector4(1, 0, 0, 0),
+                Duration = 1.0f / 30.0f,
+                ReferenceFrameSamples = new HKX.HKArray<HKX.HKVector4>(new HKX.HKArrayData<HKX.HKVector4>
+                {
+                    Elements = new List<HKX.HKVector4>(frames.Select(frame => new HKX.HKVector4(frame))),
+                }),
+            };
         }
 
         [Test]
@@ -114,50 +163,10 @@ namespace DSAnimStudioNETCore.Tests.Export
                 BakeRootMotion = true,
             });
 
-            var skeleton = new HKX.HKASkeleton
-            {
-                Bones = new HKX.HKArray<HKX.Bone>(new HKX.HKArrayData<HKX.Bone>
-                {
-                    Elements = new List<HKX.Bone>
-                    {
-                        new HKX.Bone { Name = new HKX.HKCString("Master") },
-                    },
-                }),
-                ParentIndices = new HKX.HKArray<HKX.HKShort>(new HKX.HKArrayData<HKX.HKShort>
-                {
-                    Elements = new List<HKX.HKShort>
-                    {
-                        new HKX.HKShort(-1),
-                    },
-                }),
-                Transforms = new HKX.HKArray<HKX.Transform>(new HKX.HKArrayData<HKX.Transform>
-                {
-                    Elements = new List<HKX.Transform>
-                    {
-                        new HKX.Transform
-                        {
-                            Position = new HKX.HKVector4(new Vector4(0, 0, 0, 0)),
-                            Rotation = new HKX.HKVector4(new Vector4(0, 0, 0, 1)),
-                            Scale = new HKX.HKVector4(new Vector4(1, 1, 1, 0)),
-                        },
-                    },
-                }),
-            };
-
-            var refFrame = new HKX.HKADefaultAnimatedReferenceFrame
-            {
-                Up = new Vector4(0, 1, 0, 0),
-                Forward = new Vector4(1, 0, 0, 0),
-                Duration = 1.0f / 30.0f,
-                ReferenceFrameSamples = new HKX.HKArray<HKX.HKVector4>(new HKX.HKArrayData<HKX.HKVector4>
-                {
-                    Elements = new List<HKX.HKVector4>
-                    {
-                        new HKX.HKVector4(new Vector4(0, 0, 0, 0)),
-                        new HKX.HKVector4(new Vector4(10, 0, 0, 0)),
-                    },
-                }),
-            };
+            var skeleton = CreateSingleBoneSkeleton();
+            var refFrame = CreateReferenceFrame(
+                new Vector4(0, 0, 0, 0),
+                new Vector4(10, 0, 0, 0));
 
             var animData = new TestHavokAnimationData(skeleton, refFrame, 1);
 
@@ -175,6 +184,60 @@ namespace DSAnimStudioNETCore.Tests.Export
             Assert.That(lastKey.X, Is.EqualTo(-10).Within(0.0001f));
             Assert.That(lastKey.Y, Is.EqualTo(0).Within(0.0001f));
             Assert.That(lastKey.Z, Is.EqualTo(0).Within(0.0001f));
+        }
+
+        [Test]
+        public void AnimationToFbxExporter_KeepsRootMotionSamplingInSourceSpaceUntilMatrixConversion()
+        {
+            var exporter = new AnimationToFbxExporter(new AnimationToFbxExporter.ExportOptions
+            {
+                ScaleFactor = 1.0f,
+                FrameRate = 30.0f,
+                BakeRootMotion = true,
+            });
+
+            var animData = new TestHavokAnimationData(
+                CreateSingleBoneSkeleton(),
+                CreateReferenceFrame(
+                    new Vector4(0, 0, 0, 0),
+                    new Vector4(10, 0, 5, 0)),
+                1);
+
+            var sampledRootMotion = exporter.GetRootMotionAtFrame(animData.RootMotion, 1, 1);
+
+            Assert.That(sampledRootMotion.X, Is.EqualTo(10).Within(0.0001f));
+            Assert.That(sampledRootMotion.Y, Is.EqualTo(0).Within(0.0001f));
+            Assert.That(sampledRootMotion.Z, Is.EqualTo(5).Within(0.0001f));
+        }
+
+        [Test]
+        public void AnimationToFbxExporter_FormalRootMotionTrackMatchesExportedGltfBasis()
+        {
+            var exporter = new AnimationToFbxExporter(new AnimationToFbxExporter.ExportOptions
+            {
+                ScaleFactor = 1.0f,
+                FrameRate = 30.0f,
+                BakeRootMotion = true,
+            });
+
+            var animData = new TestHavokAnimationData(
+                CreateSingleBoneSkeleton(),
+                CreateReferenceFrame(
+                    new Vector4(0, 0, 0, 0),
+                    new Vector4(10, 0, 5, 0.25f)),
+                1);
+
+            var buildRootMotionTrack = typeof(AnimationToFbxExporter).GetMethod("BuildRootMotionTrack", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(buildRootMotionTrack, Is.Not.Null);
+
+            var track = (FormalRootMotionTrack)buildRootMotionTrack.Invoke(exporter, new object[] { animData.RootMotion, animData.FrameCount });
+
+            Assert.That(track, Is.Not.Null);
+            Assert.That(track.Samples.Count, Is.EqualTo(2));
+            Assert.That(track.Samples[1].X, Is.EqualTo(-10).Within(0.0001f));
+            Assert.That(track.Samples[1].Y, Is.EqualTo(0).Within(0.0001f));
+            Assert.That(track.Samples[1].Z, Is.EqualTo(-5).Within(0.0001f));
+            Assert.That(track.Samples[1].YawRadians, Is.EqualTo(0.25f).Within(0.0001f));
         }
     }
 }

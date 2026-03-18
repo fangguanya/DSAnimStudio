@@ -1098,21 +1098,26 @@ UObject* USekiroImportCommandlet::ImportAnimationFromGltf(const FString& FilePat
 		};
 
 		const FTransform DefaultUePose = RefSkeleton.GetRefBonePose()[BoneIdx];
-		const FTransform GltfBindLocal = GltfBindPoseByBone.FindRef(BoneName);
-		const FTransform GltfBindPose = ConvertGltfLocalTransformToUeBasis(GltfBindLocal);
+		const FTransform* GltfBindLocalPtr = GltfBindPoseByBone.Find(BoneName);
+		const FTransform GltfBindLocal = GltfBindLocalPtr ? *GltfBindLocalPtr : FTransform::Identity;
+		const FVector BindTranslation = GltfBindLocal.GetTranslation();
+		FQuat BindRotation = GltfBindLocal.GetRotation();
+		BindRotation.Normalize();
+		const FVector BindScale = GltfBindLocal.GetScale3D();
+		const bool bHasGltfBindPose = (GltfBindLocalPtr != nullptr);
 
 		TArray<FVector3f> GltfPosKeys = ResampleVec3(
 			Data ? Data->TimesT : TArray<float>(),
 			Data ? Data->Positions : TArray<FVector3f>(),
-			FVector3f::ZeroVector);
+			FVector3f(BindTranslation));
 		TArray<FQuat4f> GltfRotKeys = ResampleQuat(
 			Data ? Data->TimesR : TArray<float>(),
 			Data ? Data->Rotations : TArray<FQuat4f>(),
-			FQuat4f::Identity);
+			FQuat4f(BindRotation));
 		TArray<FVector3f> GltfScaleKeys = ResampleVec3(
 			Data ? Data->TimesS : TArray<float>(),
 			Data ? Data->Scales : TArray<FVector3f>(),
-			FVector3f(1.0f, 1.0f, 1.0f));
+			FVector3f(BindScale));
 
 		TArray<FVector3f> PosKeys;
 		TArray<FQuat4f> RotKeys;
@@ -1126,16 +1131,18 @@ UObject* USekiroImportCommandlet::ImportAnimationFromGltf(const FString& FilePat
 			FQuat KeyRotation = FQuat(GltfRotKeys[KeyIndex]);
 			KeyRotation.Normalize();
 
-			const FTransform GltfKeyTransform(
-				KeyRotation,
-				FVector(GltfPosKeys[KeyIndex]),
-				FVector(GltfScaleKeys[KeyIndex]));
-			const FTransform UeKeyTransformRaw = ConvertGltfLocalTransformToUeBasis(GltfKeyTransform);
-			const FTransform UeKeyDeltaFromBind = UeKeyTransformRaw.GetRelativeTransform(GltfBindPose);
-			FTransform UeKeyTransform = DefaultUePose * UeKeyDeltaFromBind;
-			if (BoneIdx == 0)
+			FTransform UeKeyTransform = DefaultUePose;
+			if (bHasGltfBindPose)
 			{
-				UeKeyTransform = UeKeyTransform * GetImportedRootOrientationCorrection();
+				const FTransform GltfKeyTransform(
+					KeyRotation,
+					FVector(GltfPosKeys[KeyIndex]),
+					FVector(GltfScaleKeys[KeyIndex]));
+				UeKeyTransform = ConvertGltfLocalTransformToUeBasis(GltfKeyTransform);
+				if (BoneIdx == 0)
+				{
+					UeKeyTransform = UeKeyTransform * GetImportedRootOrientationCorrection();
+				}
 			}
 
 			PosKeys[KeyIndex] = FVector3f(UeKeyTransform.GetTranslation());
