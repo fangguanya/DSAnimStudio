@@ -30,6 +30,18 @@ foreach (string anibndPath in Directory.EnumerateFiles(chrDir, "c0000*.anibnd.dc
         foreach (var file in binder.Files)
         {
             string name = file.Name?.ToLowerInvariant() ?? string.Empty;
+            if (name.EndsWith(".hkx") || name.EndsWith(".hkx.dcx"))
+            {
+                string hkxStem = NormalizeAnimationKey(Path.GetFileNameWithoutExtension(Path.GetFileNameWithoutExtension(file.Name ?? string.Empty)));
+                if (string.Equals(hkxStem, targetAnimKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    foundMatch = true;
+                    Console.WriteLine($"HKX   {Path.GetFileName(anibndPath)} | File={file.Name} | Stem={hkxStem}");
+                }
+
+                continue;
+            }
+
             if (!name.EndsWith(".tae") && !name.EndsWith(".tae.dcx"))
                 continue;
 

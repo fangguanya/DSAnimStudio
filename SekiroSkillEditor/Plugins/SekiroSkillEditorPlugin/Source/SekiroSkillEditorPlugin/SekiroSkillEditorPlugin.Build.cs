@@ -29,6 +29,8 @@ public class SekiroSkillEditorPlugin : ModuleRules
 		{
 			"PropertyEditor",
 			"LevelEditor",
+			"AdvancedPreviewScene",
+			"EditorViewport",
 			"WorkspaceMenuStructure",
 			"EditorWidgets",
 			"EditorScriptingUtilities",

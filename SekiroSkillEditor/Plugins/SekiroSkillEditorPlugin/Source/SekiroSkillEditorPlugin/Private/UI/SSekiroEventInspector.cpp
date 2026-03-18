@@ -152,6 +152,74 @@ void SSekiroEventInspector::RebuildContent()
 				MakePropertyRow(Key, Value, (RowIndex++ % 2 == 0))
 			];
 		}
+
+		ContentBox->AddSlot()
+		.AutoHeight()
+		.Padding(4.0f, 6.0f)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Structured Params")))
+			.Font(FCoreStyle::Get().GetFontStyle("NormalFont"))
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.7f, 0.85f, 0.7f)))
+		];
+
+		if (Evt.Params.Num() == 0)
+		{
+			ContentBox->AddSlot()
+			.AutoHeight()
+			.Padding(8.0f, 2.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("(none)")))
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.5f, 0.5f)))
+			];
+		}
+		else
+		{
+			for (const FSekiroEventParam& Param : Evt.Params)
+			{
+				const FString Label = FString::Printf(TEXT("%s [%s @ %d]"), *Param.Name, *Param.DataType, Param.ByteOffset);
+				const FString Value = Param.Source.IsEmpty()
+					? Param.ValueJson
+					: FString::Printf(TEXT("%s | source=%s"), *Param.ValueJson, *Param.Source);
+				ContentBox->AddSlot().AutoHeight()
+				[
+					MakePropertyRow(Label, Value, (RowIndex++ % 2 == 0))
+				];
+			}
+		}
+
+		ContentBox->AddSlot()
+		.AutoHeight()
+		.Padding(4.0f, 6.0f)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Semantic Links")))
+			.Font(FCoreStyle::Get().GetFontStyle("NormalFont"))
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.9f, 0.75f, 0.55f)))
+		];
+
+		if (Evt.SemanticLinks.Num() == 0)
+		{
+			ContentBox->AddSlot()
+			.AutoHeight()
+			.Padding(8.0f, 2.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("(none)")))
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.5f, 0.5f)))
+			];
+		}
+		else
+		{
+			for (const FSekiroSemanticLink& Link : Evt.SemanticLinks)
+			{
+				ContentBox->AddSlot().AutoHeight()
+				[
+					MakePropertyRow(Link.Name, Link.ValueJson, (RowIndex++ % 2 == 0))
+				];
+			}
+		}
 	}
 }
 

@@ -24,6 +24,7 @@ namespace DSAnimStudio.Export
             public string SourceFormat { get; init; }
             public string DecodedPixelFormat { get; init; }
             public string OutputFileName { get; init; }
+            public string RelativePath { get; init; }
             public string FailureCode { get; init; }
             public string FailureMessage { get; init; }
 
@@ -93,6 +94,8 @@ namespace DSAnimStudio.Export
                     usedNames.Add(uniqueName);
 
                     string sourceFormat = TryGetTpfTextureFormat(tex);
+                    string normalizedSourceFormat = FormalTextureContract.NormalizeSourceFormat(sourceFormat);
+
                     string outputFileName;
                     string decodedPixelFormat = string.Empty;
 
@@ -103,7 +106,7 @@ namespace DSAnimStudio.Export
                     }
                     else
                     {
-                        outputFileName = $"{uniqueName}.png";
+                        outputFileName = FormalTextureContract.BuildFormalTextureFileName(uniqueName);
                         decodedPixelFormat = ExportAsPng(tex.Bytes, uniqueName, outputDir);
                     }
 
@@ -111,9 +114,10 @@ namespace DSAnimStudio.Export
                     {
                         TextureName = baseName,
                         SourceContainer = "DDS",
-                        SourceFormat = sourceFormat,
+                        SourceFormat = normalizedSourceFormat ?? sourceFormat,
                         DecodedPixelFormat = decodedPixelFormat,
                         OutputFileName = outputFileName,
+                        RelativePath = FormalTextureContract.BuildRelativeTexturePath(outputFileName),
                     });
                 }
                 catch (Exception ex)
@@ -127,6 +131,7 @@ namespace DSAnimStudio.Export
                         SourceContainer = "DDS",
                         SourceFormat = TryGetTpfTextureFormat(tex),
                         OutputFileName = string.Empty,
+                        RelativePath = string.Empty,
                         FailureCode = "TEXTURE_EXPORT_FAILED",
                         FailureMessage = ex.Message,
                     });
@@ -263,7 +268,7 @@ namespace DSAnimStudio.Export
                 return string.Empty;
 
             var formatProperty = texture.GetType().GetProperty("Format");
-            return formatProperty?.GetValue(texture)?.ToString() ?? string.Empty;
+            return FormalTextureContract.NormalizeSourceFormat(formatProperty?.GetValue(texture)?.ToString()) ?? string.Empty;
         }
 
         private static Bitmap CreateBitmap(int width, int height, PixelFormat pixelFormat, byte[] pixelData, int sourceStride)

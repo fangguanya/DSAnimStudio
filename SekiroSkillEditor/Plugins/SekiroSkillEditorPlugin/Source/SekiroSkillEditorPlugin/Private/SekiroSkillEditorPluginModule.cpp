@@ -1,15 +1,13 @@
 // Copyright (c) 2026 SekiroSkillEditor. All Rights Reserved.
 
 #include "SekiroSkillEditorPluginModule.h"
+#include "UI/SekiroSkillEditorTab.h"
 #include "LevelEditor.h"
 #include "ToolMenus.h"
-#include "Widgets/Docking/SDockTab.h"
 #include "Framework/Docking/TabManager.h"
 #include "Interfaces/IPluginManager.h"
 
 #define LOCTEXT_NAMESPACE "SekiroSkillEditorPlugin"
-
-static const FName SekiroSkillEditorTabName(TEXT("SekiroSkillEditorTab"));
 
 // ---------------------------------------------------------------------------
 // IModuleInterface
@@ -17,7 +15,7 @@ static const FName SekiroSkillEditorTabName(TEXT("SekiroSkillEditorTab"));
 
 void FSekiroSkillEditorPluginModule::StartupModule()
 {
-	RegisterEditorTab();
+	FSekiroSkillEditorTab::RegisterTab();
 
 	// Defer toolbar extension until ToolMenus is ready.
 	UToolMenus::RegisterStartupCallback(
@@ -26,36 +24,12 @@ void FSekiroSkillEditorPluginModule::StartupModule()
 
 void FSekiroSkillEditorPluginModule::ShutdownModule()
 {
-	// Unregister the nomad tab spawner.
-	FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(SekiroSkillEditorTabName);
+	FSekiroSkillEditorTab::UnregisterTab();
 
 	// Clean up toolbar extension.
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
 	ToolbarExtender.Reset();
-}
-
-// ---------------------------------------------------------------------------
-// Editor tab
-// ---------------------------------------------------------------------------
-
-void FSekiroSkillEditorPluginModule::RegisterEditorTab()
-{
-	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
-		SekiroSkillEditorTabName,
-		FOnSpawnTab::CreateLambda([](const FSpawnTabArgs& /*Args*/) -> TSharedRef<SDockTab>
-		{
-			return SNew(SDockTab)
-				.TabRole(ETabRole::NomadTab)
-				.Label(LOCTEXT("TabTitle", "Sekiro Skill Editor"))
-				[
-					SNew(STextBlock)
-						.Text(LOCTEXT("Placeholder", "Sekiro Skill Editor — content will be populated by the UI module."))
-				];
-		}))
-		.SetDisplayName(LOCTEXT("TabDisplayName", "Sekiro Skill Editor"))
-		.SetMenuType(ETabSpawnerMenuType::Enabled)
-		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Viewports"));
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +51,7 @@ void FSekiroSkillEditorPluginModule::RegisterToolbarExtension()
 			FUIAction(
 				FExecuteAction::CreateLambda([]()
 				{
-					FGlobalTabmanager::Get()->TryInvokeTab(SekiroSkillEditorTabName);
+					FSekiroSkillEditorTab::InvokeTab();
 				})),
 			LOCTEXT("ToolbarButtonLabel", "Sekiro Skills"),
 			LOCTEXT("ToolbarButtonTooltip", "Open the Sekiro Skill Editor tab"),

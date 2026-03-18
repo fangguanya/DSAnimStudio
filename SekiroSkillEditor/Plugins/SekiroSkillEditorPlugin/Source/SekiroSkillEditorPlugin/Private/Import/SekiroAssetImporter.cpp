@@ -140,6 +140,65 @@ namespace
 		return Result;
 	}
 
+	static FSekiroRootMotionTrack ParseRootMotionTrack(const TSharedPtr<FJsonObject>& AnimObject)
+	{
+		FSekiroRootMotionTrack Result;
+		if (!AnimObject.IsValid())
+		{
+			return Result;
+		}
+
+		const TSharedPtr<FJsonObject>* RootMotionObject = nullptr;
+		if (!AnimObject->TryGetObjectField(TEXT("rootMotion"), RootMotionObject) || !RootMotionObject || !RootMotionObject->IsValid())
+		{
+			return Result;
+		}
+
+		Result.FrameRate = static_cast<float>((*RootMotionObject)->GetNumberField(TEXT("frameRate")));
+		Result.DurationSeconds = static_cast<float>((*RootMotionObject)->GetNumberField(TEXT("durationSeconds")));
+		Result.TotalYawRadians = static_cast<float>((*RootMotionObject)->GetNumberField(TEXT("totalYawRadians")));
+
+		const TSharedPtr<FJsonObject>* TotalTranslationObject = nullptr;
+		if ((*RootMotionObject)->TryGetObjectField(TEXT("totalTranslation"), TotalTranslationObject) && TotalTranslationObject && TotalTranslationObject->IsValid())
+		{
+			Result.TotalTranslation = FVector(
+				(*TotalTranslationObject)->GetNumberField(TEXT("x")),
+				(*TotalTranslationObject)->GetNumberField(TEXT("y")),
+				(*TotalTranslationObject)->GetNumberField(TEXT("z")));
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* SamplesArray = nullptr;
+		if ((*RootMotionObject)->TryGetArrayField(TEXT("samples"), SamplesArray))
+		{
+			for (const TSharedPtr<FJsonValue>& SampleValue : *SamplesArray)
+			{
+				const TSharedPtr<FJsonObject> SampleObject = SampleValue->AsObject();
+				if (!SampleObject.IsValid())
+				{
+					continue;
+				}
+
+				FSekiroRootMotionSample Sample;
+				Sample.FrameIndex = SampleObject->GetIntegerField(TEXT("frameIndex"));
+				Sample.TimeSeconds = static_cast<float>(SampleObject->GetNumberField(TEXT("timeSeconds")));
+				Sample.YawRadians = static_cast<float>(SampleObject->GetNumberField(TEXT("yawRadians")));
+
+				const TSharedPtr<FJsonObject>* TranslationObject = nullptr;
+				if (SampleObject->TryGetObjectField(TEXT("translation"), TranslationObject) && TranslationObject && TranslationObject->IsValid())
+				{
+					Sample.Translation = FVector(
+						(*TranslationObject)->GetNumberField(TEXT("x")),
+						(*TranslationObject)->GetNumberField(TEXT("y")),
+						(*TranslationObject)->GetNumberField(TEXT("z")));
+				}
+
+				Result.Samples.Add(MoveTemp(Sample));
+			}
+		}
+
+		return Result;
+	}
+
 	static void PopulateCharacterDataFromJson(
 		USekiroCharacterData* CharacterAsset,
 		const TSharedPtr<FJsonObject>& CharacterObj,
@@ -274,6 +333,13 @@ TArray<USekiroSkillDataAsset*> USekiroAssetImporter::ImportSkillConfig(
 		return CreatedAssets;
 	}
 
+	const FString DeliveryMode = RootObject->GetStringField(TEXT("deliveryMode"));
+	if (DeliveryMode != TEXT("formal-only"))
+	{
+		UE_LOG(LogTemp, Error, TEXT("SekiroAssetImporter: skill_config.json must use deliveryMode=formal-only."));
+		return CreatedAssets;
+	}
+
 	const TSharedPtr<FJsonObject>* ParamsObject = nullptr;
 	if (!RootObject->TryGetObjectField(TEXT("params"), ParamsObject) || !ParamsObject || !ParamsObject->IsValid())
 	{
@@ -365,8 +431,10 @@ TArray<USekiroSkillDataAsset*> USekiroAssetImporter::ImportSkillConfig(
 			SkillAsset->AnimationName = AnimationName;
 			SkillAsset->SourceFileName = SourceFileName;
 			SkillAsset->Animation = FindAnimationAsset(CharacterContentPath / TEXT("Animations"), SourceFileName);
+			SkillAsset->CharacterData = TSoftObjectPtr<USekiroCharacterData>(CharacterAsset);
 			SkillAsset->FrameCount = FrameCount;
 			SkillAsset->FrameRate = static_cast<float>(FrameRate);
+			SkillAsset->RootMotion = ParseRootMotionTrack(AnimObj);
 			SkillAsset->Events = ParseTaeEventsFromJson(AnimObj);
 			CharacterAsset->Skills.Add(TSoftObjectPtr<USekiroSkillDataAsset>(SkillAsset));
 
@@ -465,6 +533,18 @@ TArray<FSekiroTaeEvent> USekiroAssetImporter::ParseTaeEventsFromJson(
 		{
 			UE_LOG(LogTemp, Error, TEXT("SekiroAssetImporter: Event type %d is missing canonical 'params' array."), TaeEvent.Type);
 			continue;
+		}
+
+		const TSharedPtr<FJsonObject>* SemanticLinksObj = nullptr;
+		if (EventObj->TryGetObjectField(TEXT("semanticLinks"), SemanticLinksObj) && SemanticLinksObj && SemanticLinksObj->IsValid())
+		{
+			for (const auto& Pair : (*SemanticLinksObj)->Values)
+			{
+				FSekiroSemanticLink Link;
+				Link.Name = Pair.Key;
+				Link.ValueJson = SerializeJsonValue(Pair.Value);
+				TaeEvent.SemanticLinks.Add(MoveTemp(Link));
+			}
 		}
 
 		Events.Add(MoveTemp(TaeEvent));

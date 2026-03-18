@@ -19,6 +19,13 @@ namespace DSAnimStudio.Export
     /// </summary>
     public class AnimationToFbxExporter
     {
+        public sealed class AnimationExportRecord
+        {
+            public string AnimationName { get; init; }
+            public string DeliverableFileName { get; init; }
+            public FormalRootMotionTrack RootMotion { get; init; }
+        }
+
         public class ExportOptions
         {
             /// <summary>Scale factor for translation keyframes</summary>
@@ -103,22 +110,8 @@ namespace DSAnimStudio.Export
 
             AppendSceneMeshes(scene, sceneFlvers, sceneBoneNames);
 
-            // Extract root motion reference frame if available
-            HKX.HKADefaultAnimatedReferenceFrame rootMotion = null;
-            if (_options.BakeRootMotion)
-            {
-                foreach (var obj in skeletonHkx.DataSection.Objects)
-                {
-                    if (obj is HKX.HKADefaultAnimatedReferenceFrame asRefFrame)
-                    {
-                        rootMotion = asRefFrame;
-                        break;
-                    }
-                }
-            }
-
             // Build animation
-            var anim = BuildAnimation(skeleton, animData, animName, rootMotion);
+            var anim = BuildAnimation(skeleton, animData, animName, animData.RootMotion);
             if (anim != null)
             {
                 scene.Animations.Add(anim);
@@ -165,7 +158,9 @@ namespace DSAnimStudio.Export
         public void ExportAnibnd(byte[] anibndBytes, HKX skeletonHkx, string outputDir,
             IReadOnlyList<FLVER2> sceneFlvers,
             string animationFilter = null,
-            Action<string, int, int> progressCallback = null)
+            IReadOnlyCollection<string> allowedAnimationNames = null,
+            Action<string, int, int> progressCallback = null,
+            Action<AnimationExportRecord> exportRecordCallback = null)
         {
             var bnd = BND4.Read(anibndBytes);
 
@@ -197,6 +192,22 @@ namespace DSAnimStudio.Export
                     throw new InvalidOperationException($"Animation '{animationFilter}' was not found in ANIBND.");
             }
 
+            if (allowedAnimationNames != null && allowedAnimationNames.Count > 0)
+            {
+                var allowedNames = new HashSet<string>(
+                    allowedAnimationNames
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Select(NormalizeAnimationName),
+                    StringComparer.OrdinalIgnoreCase);
+
+                animFiles = animFiles
+                    .Where(f => allowedNames.Contains(NormalizeAnimationName(Path.GetFileNameWithoutExtension(f.Name ?? string.Empty))))
+                    .ToList();
+
+                if (animFiles.Count == 0)
+                    throw new InvalidOperationException("Requested formal animation stems were not found in the selected ANIBND.");
+            }
+
             int total = animFiles.Count;
             int current = 0;
             foreach (var file in animFiles)
@@ -217,8 +228,15 @@ namespace DSAnimStudio.Export
                 if (cleanName.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase))
                     cleanName = cleanName.Substring(0, cleanName.Length - 4);
                 string outPath = Path.Combine(outputDir, $"{cleanName}.gltf");
+                var rootMotion = BuildRootMotionTrack(animData.RootMotion, animData.FrameCount);
 
                 Export(skeletonHkx, animData, cleanName, outPath, sceneFlvers);
+                exportRecordCallback?.Invoke(new AnimationExportRecord
+                {
+                    AnimationName = cleanName,
+                    DeliverableFileName = Path.GetFileName(outPath),
+                    RootMotion = rootMotion,
+                });
             }
 
             progressCallback?.Invoke("done", total, total);
@@ -651,9 +669,9 @@ namespace DSAnimStudio.Export
         /// Build an Assimp animation from HavokAnimationData.
         /// Samples every frame for each bone track.
         /// </summary>
-        private Animation BuildAnimation(HKX.HKASkeleton skeleton,
+        internal Animation BuildAnimation(HKX.HKASkeleton skeleton,
             HavokAnimationData animData, string animName,
-            HKX.HKADefaultAnimatedReferenceFrame rootMotion)
+            RootMotionData rootMotion)
         {
             var anim = new Animation();
             anim.Name = animName;
@@ -693,9 +711,9 @@ namespace DSAnimStudio.Export
                         if (boneIdx == 0 && rootMotion != null && _options.BakeRootMotion)
                         {
                             var rootMotionTransform = GetRootMotionAtFrame(rootMotion, frame, frameCount);
-                            translation.X += rootMotionTransform.X * scale;
-                            translation.Y += rootMotionTransform.Y * scale;
-                            translation.Z += rootMotionTransform.Z * scale;
+                            translation.X += rootMotionTransform.X;
+                            translation.Y += rootMotionTransform.Y;
+                            translation.Z += rootMotionTransform.Z;
                         }
 
                         var sourceMatrix = Matrix4x4.CreateScale(
@@ -738,21 +756,68 @@ namespace DSAnimStudio.Export
         /// <summary>
         /// Get root motion translation at a specific frame from the reference frame data.
         /// </summary>
-        private Vector3 GetRootMotionAtFrame(HKX.HKADefaultAnimatedReferenceFrame refFrame,
+        internal Vector3 GetRootMotionAtFrame(RootMotionData rootMotionData,
             int frame, int totalFrames)
         {
-            if (refFrame.ReferenceFrameSamples == null || refFrame.ReferenceFrameSamples.Size == 0)
+            if (rootMotionData?.Frames == null || rootMotionData.Frames.Length == 0)
                 return Vector3.Zero;
 
-            int sampleCount = (int)refFrame.ReferenceFrameSamples.Size;
-            if (sampleCount == 0) return Vector3.Zero;
+            int clampedFrameCount = Math.Max(totalFrames, 1);
+            float timeSeconds = frame / _options.FrameRate;
+            var sample = rootMotionData.GetSampleClamped(Math.Min(timeSeconds, rootMotionData.Duration > 0 ? rootMotionData.Duration : clampedFrameCount / _options.FrameRate));
+            return new Vector3(
+                sample.X * _options.ScaleFactor,
+                sample.Y * _options.ScaleFactor,
+                sample.Z * _options.ScaleFactor);
+        }
 
-            // Accumulate root motion up to the current frame
-            float t = totalFrames > 0 ? (float)frame / totalFrames : 0;
-            int sampleIdx = Math.Min((int)(t * (sampleCount - 1)), sampleCount - 1);
+        private FormalRootMotionTrack BuildRootMotionTrack(RootMotionData rootMotionData, int frameCount)
+        {
+            if (rootMotionData == null)
+                return null;
 
-            var sample = refFrame.ReferenceFrameSamples[sampleIdx];
-            return new Vector3(sample.Vector.X, sample.Vector.Y, sample.Vector.Z);
+            if (rootMotionData.Frames == null || rootMotionData.Frames.Length == 0)
+                return null;
+
+            int sampleFrameCount = Math.Max(frameCount, 1);
+            var track = new FormalRootMotionTrack
+            {
+                FrameRate = _options.FrameRate,
+                DurationSeconds = sampleFrameCount / _options.FrameRate,
+            };
+
+            Vector3 initialTranslation = Vector3.Zero;
+            float initialYaw = 0.0f;
+            bool hasInitial = false;
+
+            for (int frameIndex = 0; frameIndex <= sampleFrameCount; frameIndex++)
+            {
+                float timeSeconds = frameIndex / _options.FrameRate;
+                var sample = rootMotionData.GetSampleClamped(timeSeconds);
+                var convertedTranslation = ConvertSourceVectorToGltf(new Vector3(
+                    sample.X * _options.ScaleFactor,
+                    sample.Y * _options.ScaleFactor,
+                    sample.Z * _options.ScaleFactor));
+
+                if (!hasInitial)
+                {
+                    initialTranslation = convertedTranslation;
+                    initialYaw = sample.W;
+                    hasInitial = true;
+                }
+
+                track.Samples.Add(new FormalRootMotionSample
+                {
+                    FrameIndex = frameIndex,
+                    TimeSeconds = timeSeconds,
+                    X = convertedTranslation.X - initialTranslation.X,
+                    Y = convertedTranslation.Y - initialTranslation.Y,
+                    Z = convertedTranslation.Z - initialTranslation.Z,
+                    YawRadians = sample.W - initialYaw,
+                });
+            }
+
+            return track;
         }
 
         private Matrix4x4 ComputeWorldMatrix(IList<FLVER.Node> nodes, int boneIndex)

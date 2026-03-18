@@ -24,6 +24,8 @@
 #include "Misc/PackageName.h"
 #include "Misc/FileHelper.h"
 #include "Import/SekiroAssetImporter.h"
+#include "Import/SekiroMaterialSetup.h"
+#include "Data/SekiroCharacterData.h"
 
 namespace
 {
@@ -196,6 +198,118 @@ namespace
 
 		return FTransform(Rotation, Translation, Scale);
 	}
+
+	static bool LoadJsonObjectFromFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject)
+	{
+		FString JsonString;
+		if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
+		{
+			return false;
+		}
+
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+		return FJsonSerializer::Deserialize(Reader, OutObject) && OutObject.IsValid();
+	}
+
+	static bool ResolveDeliverableFiles(const TSharedPtr<FJsonObject>& AssetPackage, const FString& ExportDir, const FString& DeliverableId, TArray<FString>& OutFiles)
+	{
+		OutFiles.Reset();
+		if (!AssetPackage.IsValid())
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject>* DeliverablesObject = nullptr;
+		if (!AssetPackage->TryGetObjectField(TEXT("deliverables"), DeliverablesObject) || !DeliverablesObject || !DeliverablesObject->IsValid())
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject>* DeliverableObject = nullptr;
+		if (!(*DeliverablesObject)->TryGetObjectField(DeliverableId, DeliverableObject) || !DeliverableObject || !DeliverableObject->IsValid())
+		{
+			return false;
+		}
+
+		if ((*DeliverableObject)->GetStringField(TEXT("status")) != TEXT("ok"))
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* FilesArray = nullptr;
+		if (!(*DeliverableObject)->TryGetArrayField(TEXT("files"), FilesArray) || !FilesArray)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& FileValue : *FilesArray)
+		{
+			const FString RelativePath = FileValue->AsString();
+			OutFiles.Add(FPaths::ConvertRelativePathToFull(ExportDir / RelativePath));
+		}
+		return OutFiles.Num() > 0;
+	}
+
+	static USekiroCharacterData* LoadCharacterDataAsset(const FString& ChrContent, const FString& ChrId)
+	{
+		const FString AssetName = FString::Printf(TEXT("CHR_%s"), *ChrId);
+		const FString ObjectPath = FString::Printf(TEXT("%s/%s.%s"), *ChrContent, *AssetName, *AssetName);
+		return LoadObject<USekiroCharacterData>(nullptr, *ObjectPath);
+	}
+
+	static void PopulateCharacterMaterialMapFromManifest(USekiroCharacterData* CharacterAsset, const FString& ChrContent, const FString& ManifestPath)
+	{
+		if (!CharacterAsset)
+		{
+			return;
+		}
+
+		TSharedPtr<FJsonObject> ManifestObject;
+		if (!LoadJsonObjectFromFile(ManifestPath, ManifestObject))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("  Materials: failed to read manifest for CharacterData binding: %s"), *ManifestPath);
+			return;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* MaterialsArray = nullptr;
+		if (!ManifestObject->TryGetArrayField(TEXT("materials"), MaterialsArray) || !MaterialsArray)
+		{
+			return;
+		}
+
+		CharacterAsset->MaterialMap.Reset();
+		for (const TSharedPtr<FJsonValue>& MaterialValue : *MaterialsArray)
+		{
+			const TSharedPtr<FJsonObject> MaterialObj = MaterialValue->AsObject();
+			if (!MaterialObj.IsValid())
+			{
+				continue;
+			}
+
+			FString SlotName;
+			if (!MaterialObj->TryGetStringField(TEXT("slotName"), SlotName) || SlotName.IsEmpty())
+			{
+				continue;
+			}
+
+			FString MaterialKey;
+			if (!MaterialObj->TryGetStringField(TEXT("materialInstanceKey"), MaterialKey) || MaterialKey.IsEmpty())
+			{
+				MaterialObj->TryGetStringField(TEXT("name"), MaterialKey);
+			}
+
+			MaterialKey.ReplaceInline(TEXT(" "), TEXT("_"));
+			MaterialKey.ReplaceInline(TEXT("|"), TEXT("_"));
+			const FString MaterialAssetName = FString::Printf(TEXT("MI_%s"), *MaterialKey);
+			const FString MaterialObjectPath = FString::Printf(TEXT("%s/Materials/%s.%s"), *ChrContent, *MaterialAssetName, *MaterialAssetName);
+			if (UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialObjectPath))
+			{
+				CharacterAsset->MaterialMap.Add(SlotName, TSoftObjectPtr<UMaterialInterface>(Material));
+			}
+		}
+
+		CharacterAsset->MarkPackageDirty();
+	}
 }
 
 USekiroImportCommandlet::USekiroImportCommandlet()
@@ -270,28 +384,52 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 {
 	FString ChrContent = ContentBase / ChrId;
 	int32 TexCount = 0, AnimCount = 0;
+	TArray<FString> Errors;
 
-	// 1. Import textures (PNG only)
-	FString TexDir = ExportDir / TEXT("Textures");
-	TArray<FString> TexFiles;
-	IFileManager::Get().FindFiles(TexFiles, *(TexDir / TEXT("*.png")), true, false);
-	TArray<FString> TgaFiles;
-	IFileManager::Get().FindFiles(TgaFiles, *(TexDir / TEXT("*.tga")), true, false);
-	TexFiles.Append(TgaFiles);
-
-	for (const FString& TexFile : TexFiles)
+	TSharedPtr<FJsonObject> AssetPackage;
+	const FString AssetPackagePath = ExportDir / TEXT("asset_package.json");
+	if (!LoadJsonObjectFromFile(AssetPackagePath, AssetPackage))
 	{
-		FString AbsPath = FPaths::ConvertRelativePathToFull(TexDir / TexFile);
-		UObject* Result = ImportTexture(AbsPath, ChrContent / TEXT("Textures"));
-		if (Result) TexCount++;
+		UE_LOG(LogTemp, Error, TEXT("  Asset package missing or unreadable: %s"), *AssetPackagePath);
+		return;
 	}
 
-	if (TexCount > 0)
+	if (AssetPackage->GetStringField(TEXT("deliveryMode")) != TEXT("formal-only") || !AssetPackage->GetBoolField(TEXT("formalSuccess")))
+	{
+		UE_LOG(LogTemp, Error, TEXT("  Asset package is not a successful formal-only export: %s"), *AssetPackagePath);
+		return;
+	}
+
+	TArray<FString> TextureFiles;
+	TArray<FString> ModelFiles;
+	TArray<FString> AnimationFiles;
+	TArray<FString> MaterialManifestFiles;
+	TArray<FString> SkillFiles;
+	const bool bHasTextures = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("textures"), TextureFiles);
+	const bool bHasModel = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("model"), ModelFiles);
+	const bool bHasAnimations = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("animations"), AnimationFiles);
+	const bool bHasMaterialManifest = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("materialManifest"), MaterialManifestFiles);
+	const bool bHasSkills = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("skills"), SkillFiles);
+
+	// 1. Import textures (PNG only)
+	for (const FString& TextureFile : TextureFiles)
+	{
+		UObject* Result = ImportTexture(TextureFile, ChrContent / TEXT("Textures"));
+		if (Result)
+		{
+			TexCount++;
+		}
+		else
+		{
+			Errors.Add(FString::Printf(TEXT("texture import failed: %s"), *FPaths::GetCleanFilename(TextureFile)));
+		}
+	}
+
+	if (bHasTextures)
 		UE_LOG(LogTemp, Display, TEXT("  Textures: %d"), TexCount);
 
-	// 2. Import model - find best formal format: FBX > glTF > GLB
-	FString ModelDir = ExportDir / TEXT("Model");
-	FString ModelFile = FindBestModelFile(ModelDir, ChrId);
+	// 2. Import model from formal asset package
+	FString ModelFile = bHasModel ? ModelFiles[0] : TEXT("");
 
 	USkeleton* Skeleton = nullptr;
 
@@ -348,7 +486,12 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		else
 		{
 			UE_LOG(LogTemp, Warning, TEXT("  Model: FAILED (%s)"), *FPaths::GetCleanFilename(ModelFile));
+			Errors.Add(FString::Printf(TEXT("model import failed: %s"), *FPaths::GetCleanFilename(ModelFile)));
 		}
+	}
+	else
+	{
+		Errors.Add(TEXT("missing model deliverable"));
 	}
 
 	// 3. Import animations
@@ -358,30 +501,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	//   - Animation files are skeleton-only (no mesh), so FBX bone limit is not an issue
 	if (Skeleton)
 	{
-		FString AnimDir = ExportDir / TEXT("Animations");
-		TArray<FString> AllAnimFiles;
-
-		// Collect animation files, deduplicated by base name (prefer glTF > FBX)
-		// glTF is preferred because we parse it directly into AnimSequence with skeleton binding
-		TMap<FString, FString> BestAnimFiles; // BaseName -> FullPath
-		TArray<TPair<FString, int32>> FormatPriority = {
-			{TEXT("*.gltf"), 0}, {TEXT("*.glb"), 1}, {TEXT("*.fbx"), 2}
-		};
-		for (const auto& Fmt : FormatPriority)
-		{
-			TArray<FString> TempFiles;
-			IFileManager::Get().FindFiles(TempFiles, *(AnimDir / Fmt.Key), true, false);
-			for (const FString& F : TempFiles)
-			{
-				FString BaseName = FPaths::GetBaseFilename(F);
-				if (!BestAnimFiles.Contains(BaseName))
-					BestAnimFiles.Add(BaseName, FPaths::ConvertRelativePathToFull(AnimDir / F));
-			}
-		}
-		BestAnimFiles.GenerateValueArray(AllAnimFiles);
-		AllAnimFiles.Sort();
-
-		for (const FString& AnimFile : AllAnimFiles)
+		for (const FString& AnimFile : AnimationFiles)
 		{
 			FString Ext = FPaths::GetExtension(AnimFile).ToLower();
 			UObject* Result = nullptr;
@@ -396,10 +516,17 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 				Result = ImportAnimationViaFbxFactory(AnimFile, ChrContent / TEXT("Animations"), Skeleton);
 			}
 
-			if (Result) AnimCount++;
+			if (Result)
+			{
+				AnimCount++;
+			}
+			else
+			{
+				Errors.Add(FString::Printf(TEXT("animation import failed: %s"), *FPaths::GetCleanFilename(AnimFile)));
+			}
 		}
 
-		if (AnimCount > 0)
+		if (bHasAnimations)
 			UE_LOG(LogTemp, Display, TEXT("  Animations: %d"), AnimCount);
 
 		if (AnimCount > 30)
@@ -408,19 +535,70 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	else
 	{
 		UE_LOG(LogTemp, Warning, TEXT("  Animations: SKIPPED (no skeleton)"));
+		Errors.Add(TEXT("animations skipped because no skeleton was imported"));
 	}
 
-	// 4. Import skill configs
-	FString SkillDir = ExportDir / TEXT("Skills");
-	FString SkillSrc = SkillDir / TEXT("skill_config.json");
-	if (FPaths::FileExists(SkillSrc))
+	// 4. Create material instances and bind CharacterData slots from the formal manifest
+	if (bHasMaterialManifest)
 	{
+		TArray<UMaterialInstanceConstant*> MaterialInstances = USekiroMaterialSetup::SetupMaterialsFromManifest(
+			MaterialManifestFiles[0],
+			ExportDir / TEXT("Textures"),
+			ChrContent);
+		UE_LOG(LogTemp, Display, TEXT("  Materials: %d"), MaterialInstances.Num());
+	}
+	else
+	{
+		Errors.Add(TEXT("missing material manifest deliverable"));
+	}
+
+	// 5. Import skill configs
+	if (bHasSkills)
+	{
+		const FString SkillSrc = SkillFiles[0];
 		FString SkillDst = FPaths::ProjectContentDir() / TEXT("SekiroAssets/Characters") / ChrId / TEXT("Skills/skill_config.json");
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(SkillDst), true);
 		IFileManager::Get().Copy(*SkillDst, *SkillSrc, true);
 		TArray<USekiroSkillDataAsset*> ImportedSkillAssets = USekiroAssetImporter::ImportSkillConfig(SkillSrc, ChrContent / TEXT("Skills"));
 		UE_LOG(LogTemp, Display, TEXT("  Skills: imported %d skill assets"), ImportedSkillAssets.Num());
+
+		if (USekiroCharacterData* CharacterData = LoadCharacterDataAsset(ChrContent, ChrId))
+		{
+			if (bHasMaterialManifest)
+			{
+				PopulateCharacterMaterialMapFromManifest(CharacterData, ChrContent, MaterialManifestFiles[0]);
+				SavePackage(CharacterData);
+			}
+		}
+		else
+		{
+			Errors.Add(TEXT("failed to load CharacterData asset after skill import"));
+		}
 	}
+	else
+	{
+		Errors.Add(TEXT("missing skills deliverable"));
+	}
+
+	TSharedPtr<FJsonObject> ReportObject = MakeShared<FJsonObject>();
+	ReportObject->SetStringField(TEXT("schemaVersion"), TEXT("1.0"));
+	ReportObject->SetStringField(TEXT("characterId"), ChrId);
+	ReportObject->SetStringField(TEXT("deliveryMode"), TEXT("formal-only"));
+	ReportObject->SetBoolField(TEXT("modelImported"), !ModelFile.IsEmpty() && Skeleton != nullptr);
+	ReportObject->SetBoolField(TEXT("skeletonImported"), Skeleton != nullptr);
+	ReportObject->SetNumberField(TEXT("textureCount"), TexCount);
+	ReportObject->SetNumberField(TEXT("animationCount"), AnimCount);
+	TArray<TSharedPtr<FJsonValue>> ErrorValues;
+	for (const FString& Error : Errors)
+	{
+		ErrorValues.Add(MakeShared<FJsonValueString>(Error));
+	}
+	ReportObject->SetArrayField(TEXT("errors"), ErrorValues);
+	ReportObject->SetBoolField(TEXT("success"), Errors.Num() == 0);
+	FString ReportText;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ReportText);
+	FJsonSerializer::Serialize(ReportObject.ToSharedRef(), Writer);
+	FFileHelper::SaveStringToFile(ReportText, *(ExportDir / TEXT("ue_import_report.json")));
 }
 
 FString USekiroImportCommandlet::FindBestModelFile(const FString& ModelDir, const FString& ChrId)

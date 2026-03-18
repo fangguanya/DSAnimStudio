@@ -125,6 +125,7 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 
 	TArray<FString> ErrorMessages;
 	TArray<FString> WarningMessages;
+	TArray<TSharedPtr<FJsonValue>> CharacterReports;
 
 	for (int32 i = 0; i < ValidChrs.Num(); i++)
 	{
@@ -132,6 +133,20 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 		TotalChrs++;
 
 		FCharacterValidation V = ValidateCharacter(ChrId, ContentBase, ExportDir);
+		TSharedPtr<FJsonObject> CharacterReport = MakeShared<FJsonObject>();
+		CharacterReport->SetStringField(TEXT("characterId"), ChrId);
+		CharacterReport->SetBoolField(TEXT("hasSkeleton"), V.bHasSkeleton);
+		CharacterReport->SetBoolField(TEXT("hasSkeletalMesh"), V.bHasSkeletalMesh);
+		CharacterReport->SetBoolField(TEXT("hasPhysicsAsset"), V.bHasPhysicsAsset);
+		CharacterReport->SetNumberField(TEXT("boneCount"), V.BoneCount);
+		CharacterReport->SetNumberField(TEXT("animationCount"), V.AnimSequenceCount);
+		CharacterReport->SetNumberField(TEXT("textureCount"), V.TextureCount);
+		CharacterReport->SetNumberField(TEXT("materialCount"), V.MaterialCount);
+		CharacterReport->SetBoolField(TEXT("hasSkillConfig"), V.bHasSkillConfig);
+		CharacterReport->SetNumberField(TEXT("skillEventCount"), V.SkillEventCount);
+		CharacterReport->SetNumberField(TEXT("errorCount"), V.GetErrorCount());
+		CharacterReport->SetNumberField(TEXT("warningCount"), V.GetWarningCount());
+		CharacterReports.Add(MakeShared<FJsonValueObject>(CharacterReport));
 
 		// Log per-character summary
 		UE_LOG(LogTemp, Display, TEXT("[%d/%d] %s: Skel=%s Mesh=%s Bones=%d Anims=%d Tex=%d Mat=%d Skills=%s(%d events)"),
@@ -286,6 +301,19 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 	}
 	UE_LOG(LogTemp, Display, TEXT("=============================================="));
 
+	TSharedPtr<FJsonObject> ReportObject = MakeShared<FJsonObject>();
+	ReportObject->SetStringField(TEXT("schemaVersion"), TEXT("1.0"));
+	ReportObject->SetStringField(TEXT("contentBase"), ContentBase);
+	ReportObject->SetStringField(TEXT("exportDir"), ExportDir);
+	ReportObject->SetArrayField(TEXT("characters"), CharacterReports);
+	ReportObject->SetNumberField(TEXT("totalErrors"), TotalErrors);
+	ReportObject->SetNumberField(TEXT("totalWarnings"), TotalWarnings);
+	ReportObject->SetBoolField(TEXT("success"), TotalErrors == 0);
+	FString ReportText;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ReportText);
+	FJsonSerializer::Serialize(ReportObject.ToSharedRef(), Writer);
+	FFileHelper::SaveStringToFile(ReportText, *(ExportDir / TEXT("validation_report.json")));
+
 	return TotalErrors > 0 ? 1 : 0;
 }
 
@@ -411,7 +439,7 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 	// 4. Validate Materials
 	{
 		TArray<FAssetData> MatAssets;
-		AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Mesh"))), MatAssets, true);
+		AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Materials"))), MatAssets, true);
 
 		for (const FAssetData& AssetData : MatAssets)
 		{
@@ -422,8 +450,14 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 
 	// 5. Validate Skill Config
 	{
+		FString ImportReportPath = ExportDir / ChrId / TEXT("ue_import_report.json");
 		FString SkillJsonPath = ExportDir / ChrId / TEXT("Skills/skill_config.json");
 		FString CopiedSkillJson = FPaths::ProjectContentDir() / TEXT("SekiroAssets/Characters") / ChrId / TEXT("Skills/skill_config.json");
+
+		if (!FPaths::FileExists(ImportReportPath))
+		{
+			V.SkillSchemaErrors++;
+		}
 
 		if (FPaths::FileExists(CopiedSkillJson))
 		{
@@ -451,6 +485,12 @@ void USekiroValidationCommandlet::ValidateSkillConfig(
 		return;
 
 	Result.bHasSkillConfig = true;
+
+	FString DeliveryMode;
+	if (!Root->TryGetStringField(TEXT("deliveryMode"), DeliveryMode) || DeliveryMode != TEXT("formal-only"))
+	{
+		Result.SkillSchemaErrors++;
+	}
 
 	const TArray<TSharedPtr<FJsonValue>>* CharactersArray = nullptr;
 	const TSharedPtr<FJsonObject>* ParamsObject = nullptr;
@@ -533,6 +573,8 @@ void USekiroValidationCommandlet::ValidateSkillConfig(
 			Result.SkillSchemaErrors++;
 		if (!AnimObj->TryGetStringField(TEXT("fileName"), FileName))
 			Result.SkillSchemaErrors++;
+		if (!AnimObj->HasField(TEXT("relativePath")))
+			Result.SkillSchemaErrors++;
 		if (!AnimObj->TryGetNumberField(TEXT("frameRate"), FrameRate) || FrameRate <= 0.0)
 			Result.SkillSchemaErrors++;
 		if (!AnimObj->TryGetNumberField(TEXT("frameCount"), FrameCount) || FrameCount <= 0.0)
@@ -581,6 +623,8 @@ void USekiroValidationCommandlet::ValidateSkillConfig(
 			if (!EventObj->TryGetNumberField(TEXT("endFrame"), EndFrame) || EndFrame < StartFrame)
 				Result.SkillSchemaErrors++;
 			if (!EventObj->TryGetArrayField(TEXT("params"), ParamsArray))
+				Result.SkillSchemaErrors++;
+			if (!EventObj->HasField(TEXT("parameters")))
 				Result.SkillSchemaErrors++;
 
 			if (!Category.IsEmpty())

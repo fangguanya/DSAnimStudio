@@ -21,6 +21,7 @@ namespace DSAnimStudio.Export
             public string Name { get; init; }
             public string Mtd { get; init; }
             public JArray Textures { get; init; }
+            public JObject TextureBindings { get; init; }
             public JArray MeshIndices { get; } = new JArray();
         }
 
@@ -59,8 +60,10 @@ namespace DSAnimStudio.Export
                 throw new ArgumentException("At least one non-null FLVER is required.", nameof(flvers));
 
             var result = new JObject();
-            result["version"] = "1.0";
+            result["version"] = "2.0";
+            result["deliveryMode"] = "formal-only";
             result["textureFormat"] = textureFileExtension.TrimStart('.');
+            result["requiredOutputFormat"] = "png";
 
             var materialsArray = new JArray();
             var manifestEntries = new Dictionary<string, ManifestMaterialEntry>(StringComparer.Ordinal);
@@ -82,6 +85,7 @@ namespace DSAnimStudio.Export
                             Name = mat.Name ?? string.Empty,
                             Mtd = mat.MTD ?? string.Empty,
                             Textures = BuildTextureArray(mat, textureFileExtension),
+                            TextureBindings = BuildTextureBindings(mat, textureFileExtension),
                         };
                         manifestEntries.Add(key, manifestEntry);
                     }
@@ -102,7 +106,10 @@ namespace DSAnimStudio.Export
                 matObj["index"] = manifestEntry.Index;
                 matObj["name"] = manifestEntry.Name;
                 matObj["mtd"] = manifestEntry.Mtd;
+                matObj["materialInstanceKey"] = BuildMaterialInstanceKey(manifestEntry.Name, manifestEntry.Index);
+                matObj["slotName"] = manifestEntry.Name;
                 matObj["textures"] = manifestEntry.Textures;
+                matObj["textureBindings"] = manifestEntry.TextureBindings;
                 matObj["meshIndices"] = manifestEntry.MeshIndices;
                 materialsArray.Add(matObj);
             }
@@ -129,16 +136,21 @@ namespace DSAnimStudio.Export
                     continue;
 
                 var texObj = new JObject();
+                string texFileName = FlverToFbxExporter.GetTextureFileName(tex.Path);
                 texObj["type"] = tex.Type ?? "";
                 texObj["gamePath"] = tex.Path;
 
-                string texFileName = FlverToFbxExporter.GetTextureFileName(tex.Path);
-                texObj["exportedFile"] = texFileName + textureFileExtension;
+                string exportedFileName = texFileName + textureFileExtension;
+                texObj["exportedFile"] = exportedFileName;
+                texObj["exportedFileName"] = exportedFileName;
+                texObj["relativePath"] = FormalTextureContract.BuildRelativeTexturePath(exportedFileName);
 
                 var slotType = ClassifyTextureType(tex.Type,
                     ref indexAlbedo, ref indexSpecular, ref indexNormal,
                     ref indexEmissive, ref indexShininess);
                 texObj["slotType"] = slotType.ToString();
+                texObj["parameterName"] = GetParameterName(slotType);
+                texObj["colorSpace"] = FormalTextureContract.GetColorSpace(slotType.ToString());
 
                 texObj["scale"] = new JObject
                 {
@@ -150,6 +162,55 @@ namespace DSAnimStudio.Export
             }
 
             return texturesArray;
+        }
+
+        private static JObject BuildTextureBindings(FLVER2.Material mat, string textureFileExtension)
+        {
+            var bindings = new JObject();
+            foreach (JObject textureEntry in BuildTextureArray(mat, textureFileExtension).OfType<JObject>())
+            {
+                string parameterName = (string)textureEntry["parameterName"];
+                if (string.IsNullOrWhiteSpace(parameterName) || bindings.ContainsKey(parameterName))
+                    continue;
+
+                bindings[parameterName] = new JObject
+                {
+                    ["slotType"] = (string)textureEntry["slotType"] ?? string.Empty,
+                    ["exportedFileName"] = (string)textureEntry["exportedFileName"] ?? string.Empty,
+                    ["relativePath"] = (string)textureEntry["relativePath"] ?? string.Empty,
+                    ["colorSpace"] = (string)textureEntry["colorSpace"] ?? string.Empty,
+                };
+            }
+
+            return bindings;
+        }
+
+        private static string BuildMaterialInstanceKey(string materialName, int index)
+        {
+            string sanitized = (materialName ?? string.Empty)
+                .Replace(' ', '_')
+                .Replace('|', '_')
+                .Replace('/', '_')
+                .Replace('\\', '_');
+
+            if (string.IsNullOrWhiteSpace(sanitized))
+                sanitized = $"Material_{index:D3}";
+
+            return $"MI_{sanitized}";
+        }
+
+        public static string GetParameterName(TextureSlotType slotType)
+        {
+            return slotType switch
+            {
+                TextureSlotType.BaseColor => "BaseColor",
+                TextureSlotType.Normal => "Normal",
+                TextureSlotType.Specular => "Specular",
+                TextureSlotType.Emissive => "Emissive",
+                TextureSlotType.Roughness => "Roughness",
+                TextureSlotType.BlendMask => "BlendMask",
+                _ => string.Empty,
+            };
         }
 
         /// <summary>

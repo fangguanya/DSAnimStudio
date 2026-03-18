@@ -5,6 +5,7 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimSingleNodeInstance.h"
 #include "Data/SekiroCharacterData.h"
+#include "Data/SekiroSkillDataAsset.h"
 #include "Engine/SkeletalMesh.h"
 #include "Materials/MaterialInterface.h"
 
@@ -59,6 +60,32 @@ void ASekiroSkillPreviewActor::SetCharacterData(USekiroCharacterData* InCharacte
 	bIsPlaying = false;
 }
 
+void ASekiroSkillPreviewActor::SetSkillData(USekiroSkillDataAsset* InSkillData)
+{
+	CurrentSkillData = InSkillData;
+	if (!CurrentSkillData)
+	{
+		CurrentAnim = nullptr;
+		CurrentFrame = 0.0f;
+		bIsPlaying = false;
+		SetActorLocation(FVector::ZeroVector);
+		SetActorRotation(FRotator::ZeroRotator);
+		return;
+	}
+
+	if (USekiroCharacterData* LoadedCharacter = CurrentSkillData->CharacterData.LoadSynchronous())
+	{
+		SetCharacterData(LoadedCharacter);
+	}
+
+	if (UAnimSequence* LoadedAnimation = CurrentSkillData->Animation.LoadSynchronous())
+	{
+		PlayAnimation(LoadedAnimation);
+		bIsPlaying = false;
+		SetPlaybackPosition(0.0f);
+	}
+}
+
 void ASekiroSkillPreviewActor::PlayAnimation(UAnimSequence* InAnim)
 {
 	CurrentAnim = InAnim;
@@ -85,6 +112,8 @@ void ASekiroSkillPreviewActor::SetPlaybackPosition(float Frame)
 		const float TimePosition = (FrameRate > UE_KINDA_SMALL_NUMBER) ? (Frame / FrameRate) : 0.0f;
 		MeshComp->SetPosition(TimePosition);
 	}
+
+	ApplyCurrentRootMotion();
 }
 
 float ASekiroSkillPreviewActor::GetCurrentFrame() const
@@ -118,4 +147,26 @@ void ASekiroSkillPreviewActor::Tick(float DeltaSeconds)
 
 	const float TimePosition = CurrentFrame / FrameRate;
 	MeshComp->SetPosition(TimePosition);
+	ApplyCurrentRootMotion();
+}
+
+void ASekiroSkillPreviewActor::ApplyCurrentRootMotion()
+{
+	if (!CurrentSkillData)
+	{
+		SetActorLocation(FVector::ZeroVector);
+		SetActorRotation(FRotator::ZeroRotator);
+		return;
+	}
+
+	FSekiroRootMotionSample Sample;
+	if (!CurrentSkillData->GetRootMotionSampleAtFrame(CurrentFrame, Sample))
+	{
+		SetActorLocation(FVector::ZeroVector);
+		SetActorRotation(FRotator::ZeroRotator);
+		return;
+	}
+
+	SetActorLocation(Sample.Translation);
+	SetActorRotation(FRotator(0.0f, FMath::RadiansToDegrees(Sample.YawRadians), 0.0f));
 }

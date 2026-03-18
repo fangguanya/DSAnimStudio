@@ -7,9 +7,23 @@
 - **当** 动画包含 AttackBehavior、BulletBehavior、CommonBehavior、SpawnFFX、AddSpEffect、WeaponArt 或其他 Sekiro 战斗事件
 - **那么** 导出结果必须同时给出事件原始参数、可追溯的 `BehaviorParam`、`AtkParam`、`SpEffectParam`、`EquipParamWeapon` 关联字段，以及 UE 侧复刻所需的解析结果键
 
+### 需求:`skill_config` 必须服务自定义时间轴编辑器
+技能配置导出必须成为 Unreal 自定义 Sekiro 时间轴编辑器的正式序列化格式，而不是只读交换文件。
+
+#### 场景:导出可编辑时间轴数据
+- **当** 导出器为某个角色生成 `skill_config`
+- **那么** 导出结果必须保留足以驱动自定义时间轴编辑器的正式结构，包括稳定动画标识、事件顺序、轨道归类、区间边界、属性字段和与正式解析结果对应的键；禁止 UE 端再根据显示需要重新猜测轨道或事件分组
+
 ### 需求:DummyPoly 与覆盖结果显式导出
 技能配置导出必须显式记录 DummyPoly 原始索引、解析来源和覆盖结果，禁止 UE 端自行猜测。
 
 #### 场景:导出义手和战技覆盖结果
 - **当** 某个技能事件、参数表或角色配置涉及义手忍具覆盖、战技样式检查或 DummyPoly 覆盖
 - **那么** 导出结果必须同时包含原始 DummyPoly 索引、覆盖后的 DummyPoly 索引、覆盖生效条件和解析来源；禁止仅输出未解释的原始数值
+
+### 需求:技能导出必须显式交付 root-motion 元数据
+技能配置导出必须显式给出与技能时间轴对齐的 root-motion 正式元数据，禁止让 UE 端自行从动画结果猜测位移语义。
+
+#### 场景:导出技能 root-motion 对齐信息
+- **当** 某个动画片段包含角色位移或其它 root-motion 效果
+- **那么** 导出结果必须记录该片段的 root-motion 来源、时间基准、位移语义或引用键，并与事件时间轴保持同一帧基准；若 root-motion 无法确定，角色正式导出必须失败

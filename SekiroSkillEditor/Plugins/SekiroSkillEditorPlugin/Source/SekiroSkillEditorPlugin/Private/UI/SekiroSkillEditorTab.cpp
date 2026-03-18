@@ -1,6 +1,7 @@
 // Copyright (c) 2026 SekiroSkillEditor. All Rights Reserved.
 
 #include "UI/SekiroSkillEditorTab.h"
+#include "UI/SSekiroSkillPreviewViewport.h"
 #include "UI/SSekiroSkillTimeline.h"
 #include "UI/SSekiroEventInspector.h"
 #include "UI/SSekiroSkillBrowser.h"
@@ -28,6 +29,7 @@ const FName FSekiroSkillEditorTab::TabId(TEXT("SekiroSkillEditor"));
 TSharedPtr<SSekiroSkillTimeline>  FSekiroSkillEditorTab::Timeline;
 TSharedPtr<SSekiroEventInspector> FSekiroSkillEditorTab::Inspector;
 TSharedPtr<SSekiroSkillBrowser>   FSekiroSkillEditorTab::Browser;
+TSharedPtr<SSekiroSkillPreviewViewport> FSekiroSkillEditorTab::PreviewViewport;
 
 // ---------------------------------------------------------------------------
 // Registration
@@ -50,6 +52,7 @@ void FSekiroSkillEditorTab::UnregisterTab()
 	Timeline.Reset();
 	Inspector.Reset();
 	Browser.Reset();
+	PreviewViewport.Reset();
 }
 
 void FSekiroSkillEditorTab::InvokeTab()
@@ -71,20 +74,10 @@ TSharedRef<SDockTab> FSekiroSkillEditorTab::SpawnTab(const FSpawnTabArgs& SpawnT
 	SAssignNew(Inspector, SSekiroEventInspector);
 
 	SAssignNew(Timeline, SSekiroSkillTimeline)
-		.OnEventSelected_Static(&FSekiroSkillEditorTab::OnEventSelected);
+		.OnEventSelected_Static(&FSekiroSkillEditorTab::OnEventSelected)
+		.OnFrameScrubbed_Static(&FSekiroSkillEditorTab::OnFrameScrubbed);
 
-	// ---- Viewport placeholder ----
-	TSharedRef<SWidget> ViewportPlaceholder =
-		SNew(SBorder)
-		.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-		.BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.10f, 1.0f))
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
-		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("3D Viewport (placeholder)")))
-			.ColorAndOpacity(FSlateColor(FLinearColor(0.4f, 0.4f, 0.4f)))
-		];
+	SAssignNew(PreviewViewport, SSekiroSkillPreviewViewport);
 
 	// ---- Assemble the 3-panel layout via SSplitter ----
 	TSharedRef<SWidget> TabContent =
@@ -107,7 +100,12 @@ TSharedRef<SDockTab> FSekiroSkillEditorTab::SpawnTab(const FSpawnTabArgs& SpawnT
 			+ SVerticalBox::Slot()
 			.FillHeight(0.6f)
 			[
-				ViewportPlaceholder
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.07f, 1.0f))
+				[
+					PreviewViewport.ToSharedRef()
+				]
 			]
 
 			+ SVerticalBox::Slot()
@@ -147,6 +145,13 @@ void FSekiroSkillEditorTab::OnSkillSelected(USekiroSkillDataAsset* InSkillData)
 	if (Timeline.IsValid())
 	{
 		Timeline->SetSkillData(InSkillData);
+		Timeline->SetCurrentFrame(0.0f);
+	}
+
+	if (PreviewViewport.IsValid())
+	{
+		PreviewViewport->SetSkillData(InSkillData);
+		PreviewViewport->SetCurrentFrame(0.0f);
 	}
 
 	// Clear the inspector when switching skills
@@ -161,5 +166,13 @@ void FSekiroSkillEditorTab::OnEventSelected(const FSekiroTaeEvent& InEvent)
 	if (Inspector.IsValid())
 	{
 		Inspector->SetEvent(InEvent);
+	}
+}
+
+void FSekiroSkillEditorTab::OnFrameScrubbed(float InFrame)
+{
+	if (PreviewViewport.IsValid())
+	{
+		PreviewViewport->SetCurrentFrame(InFrame);
 	}
 }

@@ -13,12 +13,14 @@ namespace DSAnimStudio.Export
         public string SourceAnimFileName { get; init; }
         public string SourceAnimStem { get; init; }
         public string DeliverableAnimFileName { get; init; }
+        public string AnimationSourcePath { get; init; }
         public string AnimationSourceAnibnd { get; init; }
         public string SkillSourceAnibnd { get; init; }
+        public FormalRootMotionTrack RootMotion { get; set; }
 
         public JObject ToJson()
         {
-            return new JObject
+            var result = new JObject
             {
                 ["requestTaeId"] = RequestTaeId,
                 ["requestTaeName"] = RequestTaeName ?? string.Empty,
@@ -32,6 +34,11 @@ namespace DSAnimStudio.Export
                 ["animationSourceAnibnd"] = AnimationSourceAnibnd ?? string.Empty,
                 ["skillSourceAnibnd"] = SkillSourceAnibnd ?? string.Empty,
             };
+
+            if (RootMotion != null)
+                result["rootMotion"] = RootMotion.ToJson();
+
+            return result;
         }
     }
 }

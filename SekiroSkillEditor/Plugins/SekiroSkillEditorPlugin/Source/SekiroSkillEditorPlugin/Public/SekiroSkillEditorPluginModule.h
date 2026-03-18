@@ -18,9 +18,6 @@ public:
 	virtual void ShutdownModule() override;
 
 private:
-	/** Registers the Sekiro Skill Editor nomad tab with the global tab manager. */
-	void RegisterEditorTab();
-
 	/** Adds a toolbar button that opens the Sekiro Skill Editor tab. */
 	void RegisterToolbarExtension();
 

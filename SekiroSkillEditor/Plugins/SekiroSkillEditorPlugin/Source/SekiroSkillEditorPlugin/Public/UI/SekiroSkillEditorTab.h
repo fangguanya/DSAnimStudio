@@ -7,6 +7,7 @@
 class SSekiroSkillTimeline;
 class SSekiroEventInspector;
 class SSekiroSkillBrowser;
+class SSekiroSkillPreviewViewport;
 class USekiroSkillDataAsset;
 struct FSekiroTaeEvent;
 
@@ -46,9 +47,13 @@ private:
 	/** Delegate wiring: timeline event selection -> inspector. */
 	static void OnEventSelected(const FSekiroTaeEvent& InEvent);
 
+	/** Delegate wiring: timeline scrubbing -> preview actor. */
+	static void OnFrameScrubbed(float InFrame);
+
 	// ---- Persistent widget pointers (valid while tab is open) ----
 
 	static TSharedPtr<SSekiroSkillTimeline>   Timeline;
 	static TSharedPtr<SSekiroEventInspector>  Inspector;
 	static TSharedPtr<SSekiroSkillBrowser>    Browser;
+	static TSharedPtr<SSekiroSkillPreviewViewport> PreviewViewport;
 };

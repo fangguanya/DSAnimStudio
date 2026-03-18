@@ -24,6 +24,7 @@ namespace DSAnimStudio.Export
             public JObject Prosthetics { get; set; }
             public IReadOnlyList<FLVER2> ModelFlvers { get; set; }
             public Func<TAE.Animation, FormalAnimationResolution> ResolveAnimation { get; set; }
+            public Func<int, IReadOnlyDictionary<string, object>, JObject> ResolveEventSemanticLinks { get; set; }
         }
 
         /// <summary>
@@ -143,8 +144,9 @@ namespace DSAnimStudio.Export
 
             var result = new JObject
             {
-                ["version"] = "2.0",
+                ["version"] = "2.1",
                 ["gameType"] = "SDT",
+                ["deliveryMode"] = "formal-only",
                 ["characters"] = new JArray(),
                 ["params"] = context.Params ?? new JObject(),
             };
@@ -176,10 +178,14 @@ namespace DSAnimStudio.Export
                     ["id"] = anim.ID,
                     ["name"] = animName,
                     ["fileName"] = Path.GetFileName(resolution.DeliverableAnimFileName),
+                    ["relativePath"] = Path.Combine("Animations", Path.GetFileName(resolution.DeliverableAnimFileName)).Replace('\\', '/'),
                     ["frameRate"] = context.FrameRate,
                     ["frameCount"] = ResolveFrameCount(anim, context.FrameRate),
                     ["animationResolution"] = resolution.ToJson(),
                 };
+
+                if (resolution.RootMotion != null)
+                    animObj["rootMotion"] = resolution.RootMotion.ToJson();
 
                 if (!string.IsNullOrWhiteSpace(sourceAnimFileName))
                     animObj["sourceAnimFileName"] = sourceAnimFileName;
@@ -192,7 +198,7 @@ namespace DSAnimStudio.Export
                     {
                         try
                         {
-                            var eventObj = SerializeAction(action, context.FrameRate);
+                            var eventObj = SerializeAction(action, context.FrameRate, context.ResolveEventSemanticLinks);
                             eventsArray.Add(eventObj);
                         }
                         catch (Exception ex)
@@ -218,7 +224,7 @@ namespace DSAnimStudio.Export
         /// <summary>
         /// Serialize a single TAE action to JSON, using template for parameter names/types.
         /// </summary>
-        private JObject SerializeAction(TAE.Action action, float frameRate)
+        private JObject SerializeAction(TAE.Action action, float frameRate, Func<int, IReadOnlyDictionary<string, object>, JObject> resolveEventSemanticLinks)
         {
             var obj = new JObject
             {
@@ -235,45 +241,77 @@ namespace DSAnimStudio.Export
             _eventTemplates?.TryGetValue(action.Type, out template);
 
             if (template == null)
-                throw new InvalidOperationException($"No formal TAE template definition exists for event type {action.Type}.");
+            {
+                obj["typeName"] = $"Event_{action.Type}";
+                obj["serializationMode"] = "raw";
+                obj["params"] = new JArray();
+                obj["parameters"] = new JObject();
+
+                if (action.ParameterBytes != null && action.ParameterBytes.Length > 0)
+                    obj["rawParameterBytes"] = BitConverter.ToString(action.ParameterBytes).Replace("-", string.Empty);
+
+                return obj;
+            }
 
             int expectedByteCount = GetExpectedParameterByteCount(template);
+            int minimumRequiredByteCount = GetMinimumRequiredParameterByteCount(template);
             int actualByteCount = action.ParameterBytes?.Length ?? 0;
-            if (actualByteCount < expectedByteCount)
+            if (actualByteCount < minimumRequiredByteCount)
             {
                 string rawBytes = actualByteCount == 0
                     ? "<empty>"
                     : BitConverter.ToString(action.ParameterBytes).Replace("-", string.Empty);
                 throw new InvalidOperationException(
-                    $"Template for event type {action.Type} expects at least {expectedByteCount} parameter bytes, but TAE action contains {actualByteCount} bytes (raw={rawBytes}).");
+                    $"Template for event type {action.Type} expects at least {minimumRequiredByteCount} parameter bytes (full template={expectedByteCount}), but TAE action contains {actualByteCount} bytes (raw={rawBytes}).");
             }
 
             obj["typeName"] = template.TypeName;
 
             // Serialize parameters
             var paramsArray = new JArray();
+            var parameterMap = new JObject();
+            var parameterValues = new Dictionary<string, object>(StringComparer.Ordinal);
 
             if (action.ParameterBytes != null && template != null)
             {
                 var paramBytes = action.ParameterBytes;
                 int offset = 0;
 
+                int paramIndex = 0;
                 foreach (var paramDef in template.Parameters)
                 {
+                    if (offset >= paramBytes.Length)
+                    {
+                        if (CanTrimTrailingTemplateParameters(template.Parameters, paramIndex))
+                            break;
+
+                        throw new InvalidOperationException($"TAE parameter data ended unexpectedly at byte offset {offset} for event type {action.Type}.");
+                    }
+
                     int byteOffset = offset;
                     var parsedParam = TryReadParameterValue(paramBytes, ref offset, paramDef.DataType);
+                    string paramName = string.IsNullOrWhiteSpace(paramDef.Name) ? $"param_{byteOffset}" : paramDef.Name;
                     paramsArray.Add(CreateParamEntry(
-                        string.IsNullOrWhiteSpace(paramDef.Name) ? $"param_{byteOffset}" : paramDef.Name,
+                        paramName,
                         paramDef.DataType,
                         byteOffset,
                         parsedParam,
                         string.IsNullOrWhiteSpace(paramDef.Name) ? "template-missing-name" : "template"));
+                    parameterMap[paramName] = parsedParam == null ? JValue.CreateNull() : JToken.FromObject(parsedParam);
+                    parameterValues[paramName] = parsedParam;
+                    paramIndex++;
                 }
 
                 ValidateTrailingZeroPadding(action.Type, paramBytes, offset);
             }
 
             obj["params"] = paramsArray;
+            obj["parameters"] = parameterMap;
+
+            var semanticLinks = resolveEventSemanticLinks?.Invoke(action.Type, parameterValues);
+            if (semanticLinks != null && semanticLinks.HasValues)
+                obj["semanticLinks"] = semanticLinks;
+
             return obj;
         }
 
@@ -309,6 +347,58 @@ namespace DSAnimStudio.Export
             }
 
             return total;
+        }
+
+        private static int GetMinimumRequiredParameterByteCount(TaeEventTemplate template)
+        {
+            if (template?.Parameters == null || template.Parameters.Count == 0)
+                return 0;
+
+            int requiredCount = template.Parameters.Count;
+            while (requiredCount > 0 && IsOptionalTrailingTemplateParameter(template.Parameters[requiredCount - 1]))
+                requiredCount--;
+
+            int total = 0;
+            for (int index = 0; index < requiredCount; index++)
+            {
+                if (!ParamTypeSizes.TryGetValue(template.Parameters[index].DataType ?? string.Empty, out int size))
+                    throw new NotSupportedException($"Formal skill export does not support TAE param type '{template.Parameters[index].DataType}'.");
+
+                total += size;
+            }
+
+            return total;
+        }
+
+        private static bool CanTrimTrailingTemplateParameters(IReadOnlyList<TaeParamDef> parameters, int startIndex)
+        {
+            if (parameters == null || startIndex < 0 || startIndex > parameters.Count)
+                return false;
+
+            for (int index = startIndex; index < parameters.Count; index++)
+            {
+                if (!IsOptionalTrailingTemplateParameter(parameters[index]))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsOptionalTrailingTemplateParameter(TaeParamDef param)
+        {
+            if (param == null)
+                return false;
+
+            if (param.AssertValue == 0)
+                return true;
+
+            if (!string.IsNullOrWhiteSpace(param.Name)
+                && param.Name.StartsWith("Padding", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return string.IsNullOrWhiteSpace(param.Name);
         }
 
         private static void ValidateTrailingZeroPadding(int actionType, byte[] paramBytes, int consumedByteCount)

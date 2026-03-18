@@ -12,6 +12,7 @@
  * Delegate fired when a TAE event is selected on the timeline.
  */
 DECLARE_DELEGATE_OneParam(FOnEventSelected, const FSekiroTaeEvent& /*SelectedEvent*/);
+DECLARE_DELEGATE_OneParam(FOnFrameScrubbed, float /*CurrentFrame*/);
 
 /**
  * Custom Slate widget that renders a multi-track timeline for Sekiro TAE events.
@@ -49,6 +50,9 @@ public:
 
 		/** Called when a TAE event bar is clicked. */
 		SLATE_EVENT(FOnEventSelected, OnEventSelected)
+
+		/** Called when the playhead changes due to user interaction. */
+		SLATE_EVENT(FOnFrameScrubbed, OnFrameScrubbed)
 	SLATE_END_ARGS()
 
 	/** Construct this widget. */
@@ -125,4 +129,5 @@ private:
 
 	/** Delegate for event selection. */
 	FOnEventSelected OnEventSelected;
+	FOnFrameScrubbed OnFrameScrubbed;
 };

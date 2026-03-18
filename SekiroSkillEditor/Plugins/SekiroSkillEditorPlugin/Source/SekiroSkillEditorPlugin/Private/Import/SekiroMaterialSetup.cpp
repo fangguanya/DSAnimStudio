@@ -16,18 +16,6 @@
 
 namespace SekiroMaterialSetupInternal
 {
-	/** Maps a manifest texture slot name to the UMaterial parameter name. */
-	static const TMap<FString, FName>& GetTextureSlotMapping()
-	{
-		static const TMap<FString, FName> Mapping = {
-			{ TEXT("BaseColor"),  FName(TEXT("BaseColor"))  },
-			{ TEXT("Normal"),     FName(TEXT("Normal"))     },
-			{ TEXT("Specular"),   FName(TEXT("Specular"))   },
-			{ TEXT("Emissive"),   FName(TEXT("Emissive"))   },
-		};
-		return Mapping;
-	}
-
 	/**
 	 * Attempts to find or import a texture asset for the given filename
 	 * relative to the texture directory.
@@ -77,6 +65,28 @@ namespace SekiroMaterialSetupInternal
 			*TextureFilename, *OutputPackagePath);
 		return nullptr;
 	}
+
+	static FString GetMaterialInstanceAssetName(const TSharedPtr<FJsonObject>& MaterialObj)
+	{
+		if (!MaterialObj.IsValid())
+		{
+			return TEXT("MI_UnknownMaterial");
+		}
+
+		FString MaterialKey;
+		if (!MaterialObj->TryGetStringField(TEXT("materialInstanceKey"), MaterialKey) || MaterialKey.IsEmpty())
+		{
+			MaterialObj->TryGetStringField(TEXT("slotName"), MaterialKey);
+		}
+		if (MaterialKey.IsEmpty())
+		{
+			MaterialObj->TryGetStringField(TEXT("name"), MaterialKey);
+		}
+
+		MaterialKey.ReplaceInline(TEXT(" "), TEXT("_"));
+		MaterialKey.ReplaceInline(TEXT("|"), TEXT("_"));
+		return FString::Printf(TEXT("MI_%s"), *MaterialKey);
+	}
 }
 
 TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManifest(
@@ -104,6 +114,14 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 		return CreatedInstances;
 	}
 
+	const FString DeliveryMode = RootObject->GetStringField(TEXT("deliveryMode"));
+	if (DeliveryMode != TEXT("formal-only"))
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("SekiroMaterialSetup: Manifest must use deliveryMode=formal-only."));
+		return CreatedInstances;
+	}
+
 	// Resolve the parent material. Use the engine default lit material as the base.
 	static const FString DefaultLitMaterialPath =
 		TEXT("/Engine/EngineMaterials/DefaultLitMaterial.DefaultLitMaterial");
@@ -126,8 +144,6 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 		return CreatedInstances;
 	}
 
-	const TMap<FString, FName>& SlotMapping = SekiroMaterialSetupInternal::GetTextureSlotMapping();
-
 	for (const TSharedPtr<FJsonValue>& MaterialValue : *MaterialsArray)
 	{
 		const TSharedPtr<FJsonObject>& MaterialObj = MaterialValue->AsObject();
@@ -144,7 +160,7 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 			continue;
 		}
 
-		const FString AssetName = FString::Printf(TEXT("MI_%s"), *MaterialName);
+		const FString AssetName = SekiroMaterialSetupInternal::GetMaterialInstanceAssetName(MaterialObj);
 		const FString PackagePath = FString::Printf(TEXT("%s/Materials/%s"), *OutputPackagePath, *AssetName);
 
 		// Create the package.
@@ -172,23 +188,35 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 
 		MatInstance->SetParentEditorOnly(ParentMaterial);
 
-		// Read the "textures" sub-object and assign texture parameters.
-		const TSharedPtr<FJsonObject>* TexturesObj = nullptr;
-		if (MaterialObj->TryGetObjectField(TEXT("textures"), TexturesObj))
+		// Read the canonical textureBindings array and assign texture parameters.
+		const TArray<TSharedPtr<FJsonValue>>* TextureBindingsArray = nullptr;
+		if (MaterialObj->TryGetArrayField(TEXT("textureBindings"), TextureBindingsArray))
 		{
-			for (const auto& SlotPair : SlotMapping)
+			for (const TSharedPtr<FJsonValue>& BindingValue : *TextureBindingsArray)
 			{
-				FString TextureFilename;
-				if ((*TexturesObj)->TryGetStringField(SlotPair.Key, TextureFilename) && !TextureFilename.IsEmpty())
+				const TSharedPtr<FJsonObject> BindingObj = BindingValue->AsObject();
+				if (!BindingObj.IsValid())
 				{
-					UTexture2D* Texture = SekiroMaterialSetupInternal::ResolveTexture(
-						TextureFilename, TextureDirectory, OutputPackagePath);
+					continue;
+				}
 
-					if (Texture)
-					{
-						MatInstance->SetTextureParameterValueEditorOnly(
-							SlotPair.Value, Texture);
-					}
+				FString TextureFilename;
+				FString ParameterName;
+				if (!BindingObj->TryGetStringField(TEXT("exportedFileName"), TextureFilename) || TextureFilename.IsEmpty())
+				{
+					continue;
+				}
+				if (!BindingObj->TryGetStringField(TEXT("parameterName"), ParameterName) || ParameterName.IsEmpty())
+				{
+					continue;
+				}
+
+				UTexture2D* Texture = SekiroMaterialSetupInternal::ResolveTexture(
+					TextureFilename, TextureDirectory, OutputPackagePath);
+
+				if (Texture)
+				{
+					MatInstance->SetTextureParameterValueEditorOnly(FName(*ParameterName), Texture);
 				}
 			}
 		}

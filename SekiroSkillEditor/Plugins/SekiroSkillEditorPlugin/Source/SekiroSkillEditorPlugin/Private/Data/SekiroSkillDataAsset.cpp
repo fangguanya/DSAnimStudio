@@ -27,3 +27,18 @@ TArray<FSekiroTaeEvent> USekiroSkillDataAsset::GetEventAtFrame(float Frame) cons
 	}
 	return Result;
 }
+
+bool USekiroSkillDataAsset::GetRootMotionSampleAtFrame(float Frame, FSekiroRootMotionSample& OutSample) const
+{
+	const int32 RoundedFrame = FMath::RoundToInt(Frame);
+	for (const FSekiroRootMotionSample& Sample : RootMotion.Samples)
+	{
+		if (Sample.FrameIndex == RoundedFrame)
+		{
+			OutSample = Sample;
+			return true;
+		}
+	}
+
+	return false;
+}

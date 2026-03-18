@@ -17,6 +17,7 @@ void SSekiroSkillTimeline::Construct(const FArguments& InArgs)
 	Zoom          = FMath::Max(InArgs._Zoom, 0.01f);
 	ScrollOffset  = InArgs._ScrollOffset;
 	OnEventSelected = InArgs._OnEventSelected;
+	OnFrameScrubbed = InArgs._OnFrameScrubbed;
 
 	RebuildCategoryList();
 
@@ -44,6 +45,7 @@ void SSekiroSkillTimeline::SetCurrentFrame(float InFrame)
 {
 	CurrentFrame = FMath::Max(InFrame, 0.0f);
 	Invalidate(EInvalidateWidgetReason::Paint);
+	OnFrameScrubbed.ExecuteIfBound(CurrentFrame);
 }
 
 void SSekiroSkillTimeline::SetZoom(float InZoom)
@@ -401,6 +403,7 @@ FReply SSekiroSkillTimeline::OnMouseButtonDown(const FGeometry& MyGeometry, cons
 			const float NewFrame = PixelToFrame(LocalPos.X);
 			CurrentFrame = FMath::Max(NewFrame, 0.0f);
 			Invalidate(EInvalidateWidgetReason::Paint);
+			OnFrameScrubbed.ExecuteIfBound(CurrentFrame);
 			return FReply::Handled().CaptureMouse(SharedThis(const_cast<SSekiroSkillTimeline*>(this)));
 		}
 	}
@@ -434,6 +437,7 @@ FReply SSekiroSkillTimeline::OnMouseMove(const FGeometry& MyGeometry, const FPoi
 
 		CurrentFrame = FMath::Clamp(NewFrame, 0.0f, MaxFrame);
 		Invalidate(EInvalidateWidgetReason::Paint);
+		OnFrameScrubbed.ExecuteIfBound(CurrentFrame);
 		return FReply::Handled();
 	}
 

@@ -9,6 +9,7 @@
 
 class USkeletalMeshComponent;
 class USekiroCharacterData;
+class USekiroSkillDataAsset;
 
 /**
  * Preview actor that displays a Sekiro character's skeletal mesh
@@ -38,6 +39,10 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Preview")
 	TObjectPtr<USekiroCharacterData> CurrentCharacterData;
 
+	/** Skill data currently driving root motion and animation metadata. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Preview")
+	TObjectPtr<USekiroSkillDataAsset> CurrentSkillData;
+
 	/** Playback speed multiplier. 1.0 = normal speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preview|Animation", meta = (ClampMin = "0.0", ClampMax = "10.0"))
 	float PlaybackRate = 1.0f;
@@ -58,6 +63,9 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Preview")
 	void SetCharacterData(USekiroCharacterData* InCharacterData);
+
+	UFUNCTION(BlueprintCallable, Category = "Preview")
+	void SetSkillData(USekiroSkillDataAsset* InSkillData);
 
 	/**
 	 * Assigns a new animation sequence to the skeletal mesh component and
@@ -80,4 +88,7 @@ public:
 	// -- AActor overrides ----------------------------------------------------
 
 	virtual void Tick(float DeltaSeconds) override;
+
+private:
+	void ApplyCurrentRootMotion();
 };

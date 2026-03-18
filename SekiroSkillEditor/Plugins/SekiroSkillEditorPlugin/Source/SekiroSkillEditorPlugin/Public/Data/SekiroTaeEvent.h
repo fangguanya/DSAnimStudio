@@ -31,6 +31,18 @@ struct SEKIROSKILLEDITORPLUGIN_API FSekiroEventParam
 };
 
 USTRUCT(BlueprintType)
+struct SEKIROSKILLEDITORPLUGIN_API FSekiroSemanticLink
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TAE Event")
+	FString Name;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TAE Event")
+	FString ValueJson;
+};
+
+USTRUCT(BlueprintType)
 struct SEKIROSKILLEDITORPLUGIN_API FSekiroTaeEvent
 {
 	GENERATED_BODY()
@@ -62,6 +74,10 @@ struct SEKIROSKILLEDITORPLUGIN_API FSekiroTaeEvent
 	/** Structured event parameters preserving type and byte-offset metadata. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TAE Event")
 	TArray<FSekiroEventParam> Params;
+
+	/** Canonical semantic links emitted by the exporter for UI and validation. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TAE Event")
+	TArray<FSekiroSemanticLink> SemanticLinks;
 
 	/**
 	 * Returns a display color associated with the given event category.

@@ -1240,9 +1240,8 @@
     <s32 />
     <s32 />
     <s32 />
-    <s32 name="Padding1" />
-    <s32 name="Padding2" />
-    <s32 name="Padding3" />
+    <s32 />
+    <s32 />
   </action>
   <action id="709" name="NewSekiroFlag709">
     <s32 assert="0" />
