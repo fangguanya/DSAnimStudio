@@ -34,7 +34,8 @@ public class SekiroSkillEditorPlugin : ModuleRules
 			"EditorWidgets",
 			"EditorScriptingUtilities",
 			"InterchangeCore",
-			"InterchangeEngine"
+			"InterchangeEngine",
+			"InterchangePipelines"
 		});
 	}
 }

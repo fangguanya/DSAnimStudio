@@ -1,3 +1,15 @@
+## 环境配置
+
+### 已确认路径
+- **UE5 编辑器命令行**: `D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe`
+- **UE 工程**: `E:\Sekiro\DSAnimStudio\SekiroSkillEditor\SekiroSkillEditor.uproject`
+- **导入源目录**: `E:\Sekiro\Export`
+
+### 运行导入 Commandlet
+```
+"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" E:\Sekiro\DSAnimStudio\SekiroSkillEditor\SekiroSkillEditor.uproject -run=SekiroImport -ExportDir=E:\Sekiro\Export -ChrFilter=c0000 -unattended -nopause -nosplash -nullrhi
+```
+
 ## 新增需求
 
 ### 需求:Python批量FBX导入脚本

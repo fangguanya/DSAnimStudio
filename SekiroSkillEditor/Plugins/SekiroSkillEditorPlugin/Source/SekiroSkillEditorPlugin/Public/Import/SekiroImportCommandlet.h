@@ -6,7 +6,7 @@
 
 /**
  * Commandlet to batch import Sekiro exported assets (textures, models, animations).
- * Supports FBX, glTF (via Interchange), and Collada formats.
+ * Only glTF 2.0 (.gltf/.glb) and PNG are accepted as formal inputs.
  * Usage: UnrealEditor-Cmd.exe project.uproject -run=SekiroImport -ExportDir="E:/Sekiro/Export" [-ChrFilter=c1020,c1000]
  */
 UCLASS()
@@ -20,21 +20,14 @@ public:
 	virtual int32 Main(const FString& Params) override;
 
 private:
-	// Import via UE5 Interchange (for glTF/glb models - handles skeleton/skin properly)
-	UObject* ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath);
-
-	// Import via FBX factory (for FBX/DAE formats)
-	UObject* ImportMeshViaFbxFactory(const FString& FilePath, const FString& DestPackagePath);
-	UObject* ImportAnimationViaFbxFactory(const FString& FilePath, const FString& DestPackagePath, class USkeleton* Skeleton);
-
-	// Import animation by parsing glTF and creating AnimSequence programmatically
-	UObject* ImportAnimationFromGltf(const FString& FilePath, const FString& DestPackagePath, class USkeleton* Skeleton);
+	// Import via UE5 Interchange (glTF/glb - models AND animations)
+	// Pass a valid Skeleton to import animations only (uses existing skeleton)
+	UObject* ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, class USkeleton* SkeletonOverride = nullptr);
 
 	UObject* ImportTexture(const FString& FilePath, const FString& DestPackagePath);
 
-	void ImportCharacter(const FString& ChrId, const FString& ExportDir, const FString& ContentBase);
+	void ImportCharacter(const FString& ChrId, const FString& ExportDir, const FString& ContentBase, int32 AnimLimit = -1);
 
-	FString FindBestModelFile(const FString& ModelDir, const FString& ChrId);
 	class USkeleton* FindSkeletonInPackage(const FString& PackagePath);
 	bool SavePackage(UObject* Asset);
 };

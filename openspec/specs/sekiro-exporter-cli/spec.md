@@ -1,3 +1,10 @@
+## 环境配置
+
+### 已确认路径
+- **Sekiro 游戏目录**: `C:\Program Files (x86)\Steam\steamapps\common\Sekiro`
+- **SekiroExporter 可执行文件**: `E:\Sekiro\DSAnimStudio\SekiroExporter\bin\Release\net6.0-windows\SekiroExporter.exe`
+- **导出输出目录**: `E:\Sekiro\Export`
+
 ## 新增需求
 
 ### 需求:CLI批量导出工具

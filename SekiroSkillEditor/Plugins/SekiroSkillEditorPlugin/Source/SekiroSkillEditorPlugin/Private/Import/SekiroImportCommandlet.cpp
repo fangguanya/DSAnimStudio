@@ -1,6 +1,4 @@
 #include "Import/SekiroImportCommandlet.h"
-#include "Factories/FbxFactory.h"
-#include "Factories/FbxImportUI.h"
 #include "Factories/TextureFactory.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
@@ -13,6 +11,8 @@
 #include "IAssetTools.h"
 #include "InterchangeManager.h"
 #include "InterchangeSourceData.h"
+#include "InterchangeGenericAssetsPipeline.h"
+#include "InterchangeGenericAssetsPipelineSharedSettings.h"
 #include "Animation/AnimData/IAnimationDataController.h"
 #include "ReferenceSkeleton.h"
 #include "Dom/JsonObject.h"
@@ -112,18 +112,20 @@ namespace
 
 	static FVector MapGltfVectorToUeBasis(const FVector& InVector)
 	{
-		return FVector(-InVector.Y, -InVector.Z, -InVector.X);
+		return InVector;
+	}
+
+	static FQuat MapGltfRotationToUeBasis(const FQuat& InQuat)
+	{
+		return InQuat;
 	}
 
 	static FTransform ConvertGltfLocalTransformToUeBasis(const FTransform& InTransform)
 	{
-		static const FMatrix GltfToUeBasis = MakeGltfToUeBasisMatrix();
-		static const FMatrix UeToGltfBasis = GltfToUeBasis.GetTransposed();
-
-		const FMatrix InMatrix = InTransform.ToMatrixWithScale();
-		FMatrix OutMatrix = GltfToUeBasis * InMatrix * UeToGltfBasis;
-		OutMatrix.SetOrigin(OutMatrix.GetOrigin() * GltfToUeLengthScale);
-		return FTransform(OutMatrix);
+		return FTransform(
+			InTransform.GetRotation(),
+			InTransform.GetTranslation() * GltfToUeLengthScale,
+			InTransform.GetScale3D());
 	}
 
 	static void ApplyImportedRootOrientationCorrection(USkeleton* Skeleton, USkeletalMesh* SkeletalMesh)
@@ -231,7 +233,8 @@ namespace
 			return false;
 		}
 
-		if ((*DeliverableObject)->GetStringField(TEXT("status")) != TEXT("ok"))
+		const FString DeliverableStatus = (*DeliverableObject)->GetStringField(TEXT("status"));
+		if (DeliverableStatus != TEXT("ready") && DeliverableStatus != TEXT("ok"))
 		{
 			return false;
 		}
@@ -325,6 +328,7 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	FString ExportDir;
 	FString ChrFilterStr;
 	FString ContentBase = TEXT("/Game/SekiroAssets/Characters");
+	int32 AnimLimit = -1;
 
 	TArray<FString> Tokens;
 	TArray<FString> Switches;
@@ -341,6 +345,9 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 
 	if (ParamsMap.Contains(TEXT("ContentBase")))
 		ContentBase = ParamsMap[TEXT("ContentBase")];
+
+	if (ParamsMap.Contains(TEXT("AnimLimit")))
+		AnimLimit = FCString::Atoi(*ParamsMap[TEXT("AnimLimit")]);
 
 	UE_LOG(LogTemp, Display, TEXT("=== Sekiro Import Commandlet ==="));
 	UE_LOG(LogTemp, Display, TEXT("ExportDir: %s"), *ExportDir);
@@ -369,7 +376,7 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	{
 		const FString& ChrId = ValidChrs[i];
 		UE_LOG(LogTemp, Display, TEXT("[%d/%d] Importing %s..."), i + 1, ValidChrs.Num(), *ChrId);
-		ImportCharacter(ChrId, ExportDir / ChrId, ContentBase);
+		ImportCharacter(ChrId, ExportDir / ChrId, ContentBase, AnimLimit);
 
 		if ((i + 1) % 5 == 0)
 			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
@@ -380,7 +387,7 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	return 0;
 }
 
-void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FString& ExportDir, const FString& ContentBase)
+void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FString& ExportDir, const FString& ContentBase, int32 AnimLimit)
 {
 	FString ChrContent = ContentBase / ChrId;
 	int32 TexCount = 0, AnimCount = 0;
@@ -410,6 +417,12 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	const bool bHasAnimations = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("animations"), AnimationFiles);
 	const bool bHasMaterialManifest = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("materialManifest"), MaterialManifestFiles);
 	const bool bHasSkills = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("skills"), SkillFiles);
+
+	if (AnimLimit > 0 && AnimationFiles.Num() > AnimLimit)
+	{
+		AnimationFiles.SetNum(AnimLimit);
+		UE_LOG(LogTemp, Display, TEXT("  AnimLimit=%d: truncating to first %d animations"), AnimLimit, AnimLimit);
+	}
 
 	// 1. Import textures (PNG only)
 	for (const FString& TextureFile : TextureFiles)
@@ -442,14 +455,12 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 
 		if (Extension == TEXT("gltf") || Extension == TEXT("glb"))
 		{
-			// Use AssetImportTask for glTF - routes through Interchange framework
-			// which properly handles skeleton/skin data
 			Result = ImportViaAssetTask(ModelFile, ChrContent / TEXT("Mesh"));
 		}
 		else
 		{
-			// FBX/DAE - use FBX factory
-			Result = ImportMeshViaFbxFactory(ModelFile, ChrContent / TEXT("Mesh"));
+			UE_LOG(LogTemp, Error, TEXT("  Model: rejected non-glTF format '%s' - only .gltf/.glb accepted"), *Extension);
+			Errors.Add(FString::Printf(TEXT("model format not accepted (only gltf/glb): %s"), *FPaths::GetCleanFilename(ModelFile)));
 		}
 
 		if (Result)
@@ -459,7 +470,6 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			{
 				UE_LOG(LogTemp, Display, TEXT("  Model: OK (SkeletalMesh)"));
 				Skeleton = SkelMesh->GetSkeleton();
-				ApplyImportedRootOrientationCorrection(Skeleton, SkelMesh);
 				SavePackage(SkelMesh);
 				if (Skeleton)
 					SavePackage(Skeleton);
@@ -468,15 +478,12 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			}
 			else
 			{
-				// Interchange might return a different object type, check for skeleton in package
 				UE_LOG(LogTemp, Display, TEXT("  Model: OK (%s) - checking for skeleton..."),
 					*Result->GetClass()->GetName());
 
-				// Try to find skeleton asset that was created alongside the mesh
 				Skeleton = FindSkeletonInPackage(ChrContent / TEXT("Mesh"));
 				if (Skeleton)
 				{
-					ApplyImportedRootOrientationCorrection(Skeleton, nullptr);
 					SavePackage(Skeleton);
 				}
 				if (Skeleton)
@@ -494,27 +501,24 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		Errors.Add(TEXT("missing model deliverable"));
 	}
 
-	// 3. Import animations
-	// NOTE: For animations, prefer FBX/DAE over glTF because:
-	//   - FBX factory can specify a target skeleton (ImportUI->Skeleton)
-	//   - Interchange (glTF) cannot bind animation to an existing skeleton
-	//   - Animation files are skeleton-only (no mesh), so FBX bone limit is not an issue
+	// 3. Import animations via Interchange (same pipeline as model)
 	if (Skeleton)
 	{
 		for (const FString& AnimFile : AnimationFiles)
 		{
 			FString Ext = FPaths::GetExtension(AnimFile).ToLower();
-			UObject* Result = nullptr;
 
-			if (Ext == TEXT("gltf") || Ext == TEXT("glb"))
+			if (Ext != TEXT("gltf") && Ext != TEXT("glb"))
 			{
-				// Parse glTF directly and create AnimSequence programmatically
-				Result = ImportAnimationFromGltf(AnimFile, ChrContent / TEXT("Animations"), Skeleton);
+				UE_LOG(LogTemp, Error, TEXT("  Animation: rejected non-glTF format '%s'"), *Ext);
+				Errors.Add(FString::Printf(TEXT("animation format not accepted: %s"), *FPaths::GetCleanFilename(AnimFile)));
+				continue;
 			}
-			else
-			{
-				Result = ImportAnimationViaFbxFactory(AnimFile, ChrContent / TEXT("Animations"), Skeleton);
-			}
+
+			const FString AnimName = FPaths::GetBaseFilename(AnimFile);
+			const FString AnimDest = ChrContent / TEXT("Animations");
+
+			UObject* Result = ImportViaAssetTask(AnimFile, AnimDest, Skeleton);
 
 			if (Result)
 			{
@@ -601,27 +605,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	FFileHelper::SaveStringToFile(ReportText, *(ExportDir / TEXT("ue_import_report.json")));
 }
 
-FString USekiroImportCommandlet::FindBestModelFile(const FString& ModelDir, const FString& ChrId)
-{
-	// Priority: FBX > glTF > GLB
-	TArray<TPair<FString, FString>> Extensions = {
-		{TEXT("*.fbx"), TEXT("")},
-		{TEXT("*.gltf"), TEXT("")},
-		{TEXT("*.glb"), TEXT("")}
-	};
-
-	for (const auto& Pair : Extensions)
-	{
-		TArray<FString> Files;
-		IFileManager::Get().FindFiles(Files, *(ModelDir / Pair.Key), true, false);
-		if (Files.Num() > 0)
-			return FPaths::ConvertRelativePathToFull(ModelDir / Files[0]);
-	}
-
-	return TEXT("");
-}
-
-UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath)
+UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, USkeleton* SkeletonOverride)
 {
 	// Use UInterchangeManager directly to avoid AssetTools/ContentBrowser notification
 	// that crashes in commandlet mode (Slate not initialized)
@@ -638,6 +622,17 @@ UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, co
 	ImportParams.bIsAutomated = true;
 	ImportParams.bReplaceExisting = true;
 	ImportParams.DestinationName = FPaths::GetBaseFilename(FilePath);
+
+	if (SkeletonOverride)
+	{
+		UInterchangeGenericAssetsPipeline* Pipeline = NewObject<UInterchangeGenericAssetsPipeline>(GetTransientPackage());
+		if (Pipeline->CommonSkeletalMeshesAndAnimationsProperties)
+		{
+			Pipeline->CommonSkeletalMeshesAndAnimationsProperties->Skeleton = SkeletonOverride;
+			Pipeline->CommonSkeletalMeshesAndAnimationsProperties->bImportOnlyAnimations = true;
+		}
+		ImportParams.OverridePipelines.Add(FSoftObjectPath(Pipeline));
+	}
 
 	TArray<UObject*> ImportedObjects;
 	bool bSuccess = InterchangeManager.ImportAsset(DestPackagePath, SourceData, ImportParams, ImportedObjects);
@@ -687,98 +682,6 @@ UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, co
 		}
 	}
 
-	return Result;
-}
-
-UObject* USekiroImportCommandlet::ImportMeshViaFbxFactory(const FString& FilePath, const FString& DestPackagePath)
-{
-	FString FileName = FPaths::GetBaseFilename(FilePath);
-	FString PackagePath = DestPackagePath / FileName;
-
-	UPackage* Package = CreatePackage(*PackagePath);
-	if (!Package) return nullptr;
-	Package->FullyLoad();
-
-	UFbxFactory* Factory = NewObject<UFbxFactory>();
-	Factory->AddToRoot();
-
-	UFbxImportUI* ImportUI = NewObject<UFbxImportUI>();
-	ImportUI->bImportMesh = true;
-	ImportUI->bImportAsSkeletal = true;
-	ImportUI->bImportAnimations = false;
-	ImportUI->bImportMaterials = false;
-	ImportUI->bImportTextures = false;
-	ImportUI->bCreatePhysicsAsset = true;
-	ImportUI->bIsReimport = false;
-	ImportUI->bAutomatedImportShouldDetectType = false;
-	Factory->SetDetectImportTypeOnImport(false);
-	Factory->ImportUI = ImportUI;
-
-	bool bCancelled = false;
-
-	UObject* Result = UFactory::StaticImportObject(
-		USkeletalMesh::StaticClass(),
-		Package,
-		FName(*FileName),
-		RF_Public | RF_Standalone,
-		bCancelled,
-		*FilePath,
-		nullptr,
-		Factory);
-
-	if (Result)
-	{
-		FAssetRegistryModule::AssetCreated(Result);
-		SavePackage(Result);
-	}
-
-	Factory->RemoveFromRoot();
-	return Result;
-}
-
-UObject* USekiroImportCommandlet::ImportAnimationViaFbxFactory(const FString& FilePath, const FString& DestPackagePath, USkeleton* Skeleton)
-{
-	if (!Skeleton) return nullptr;
-
-	FString FileName = FPaths::GetBaseFilename(FilePath);
-	FString PackagePath = DestPackagePath / FileName;
-
-	UPackage* Package = CreatePackage(*PackagePath);
-	if (!Package) return nullptr;
-	Package->FullyLoad();
-
-	UFbxFactory* Factory = NewObject<UFbxFactory>();
-	Factory->AddToRoot();
-
-	UFbxImportUI* ImportUI = NewObject<UFbxImportUI>();
-	ImportUI->bImportMesh = false;
-	ImportUI->bImportAsSkeletal = true;
-	ImportUI->bImportAnimations = true;
-	ImportUI->Skeleton = Skeleton;
-	ImportUI->bIsReimport = false;
-	ImportUI->bAutomatedImportShouldDetectType = false;
-	Factory->SetDetectImportTypeOnImport(false);
-	Factory->ImportUI = ImportUI;
-
-	bool bCancelled = false;
-
-	UObject* Result = UFactory::StaticImportObject(
-		UAnimSequence::StaticClass(),
-		Package,
-		FName(*FileName),
-		RF_Public | RF_Standalone,
-		bCancelled,
-		*FilePath,
-		nullptr,
-		Factory);
-
-	if (Result)
-	{
-		FAssetRegistryModule::AssetCreated(Result);
-		SavePackage(Result);
-	}
-
-	Factory->RemoveFromRoot();
 	return Result;
 }
 
@@ -839,348 +742,6 @@ USkeleton* USekiroImportCommandlet::FindSkeletonInPackage(const FString& Package
 	return nullptr;
 }
 
-UObject* USekiroImportCommandlet::ImportAnimationFromGltf(const FString& FilePath, const FString& DestPackagePath, USkeleton* Skeleton)
-{
-	if (!Skeleton) return nullptr;
-
-	// 1. Load and parse glTF/GLB payload
-	FGltfPayload Payload;
-	if (!LoadGltfPayload(FilePath, Payload))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("    Failed to read glTF/GLB payload: %s"), *FPaths::GetCleanFilename(FilePath));
-		return nullptr;
-	}
-
-	TSharedPtr<FJsonObject> Root;
-	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Payload.JsonString);
-	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("    Failed to parse glTF JSON: %s"), *FPaths::GetCleanFilename(FilePath));
-		return nullptr;
-	}
-
-	TArray<uint8> BinData;
-	if (FPaths::GetExtension(FilePath).Equals(TEXT("glb"), ESearchCase::IgnoreCase))
-	{
-		BinData = Payload.BinaryChunk;
-	}
-	else
-	{
-		const TArray<TSharedPtr<FJsonValue>>* BuffersArray;
-		if (!Root->TryGetArrayField(TEXT("buffers"), BuffersArray) || BuffersArray->Num() == 0)
-			return nullptr;
-
-		FString BinUri = (*BuffersArray)[0]->AsObject()->GetStringField(TEXT("uri"));
-		FString BinPath = FPaths::GetPath(FilePath) / BinUri;
-		if (!FFileHelper::LoadFileToArray(BinData, *BinPath))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("    Failed to read binary: %s"), *BinUri);
-			return nullptr;
-		}
-	}
-
-	// 3. Parse node names for bone mapping
-	const TArray<TSharedPtr<FJsonValue>>* NodesArray;
-	if (!Root->TryGetArrayField(TEXT("nodes"), NodesArray))
-		return nullptr;
-
-	TArray<FString> NodeNames;
-	NodeNames.SetNum(NodesArray->Num());
-	TMap<FName, FTransform> GltfBindPoseByBone;
-	for (int32 i = 0; i < NodesArray->Num(); i++)
-	{
-		TSharedPtr<FJsonObject> Node = (*NodesArray)[i]->AsObject();
-		NodeNames[i] = Node->HasField(TEXT("name")) ? Node->GetStringField(TEXT("name")) : FString::Printf(TEXT("node_%d"), i);
-		GltfBindPoseByBone.Add(FName(*NodeNames[i]), ParseGltfNodeLocalTransform(Node));
-	}
-
-	// 4. Parse accessors and bufferViews
-	const TArray<TSharedPtr<FJsonValue>>* AccessorsArray;
-	const TArray<TSharedPtr<FJsonValue>>* BufferViewsArray;
-	if (!Root->TryGetArrayField(TEXT("accessors"), AccessorsArray) ||
-		!Root->TryGetArrayField(TEXT("bufferViews"), BufferViewsArray))
-		return nullptr;
-
-	// Helper lambda: read accessor data as float array
-	auto ReadAccessorFloats = [&](int32 AccessorIdx, int32 ExpectedComponents) -> TArray<float>
-	{
-		TArray<float> Result;
-		if (AccessorIdx < 0 || AccessorIdx >= AccessorsArray->Num()) return Result;
-
-		TSharedPtr<FJsonObject> Acc = (*AccessorsArray)[AccessorIdx]->AsObject();
-		int32 Count = Acc->GetIntegerField(TEXT("count"));
-		int32 BvIdx = Acc->GetIntegerField(TEXT("bufferView"));
-		int32 AccOffset = Acc->HasField(TEXT("byteOffset")) ? Acc->GetIntegerField(TEXT("byteOffset")) : 0;
-
-		if (BvIdx < 0 || BvIdx >= BufferViewsArray->Num()) return Result;
-		TSharedPtr<FJsonObject> Bv = (*BufferViewsArray)[BvIdx]->AsObject();
-		int32 BvOffset = Bv->HasField(TEXT("byteOffset")) ? Bv->GetIntegerField(TEXT("byteOffset")) : 0;
-
-		int32 TotalOffset = BvOffset + AccOffset;
-		int32 TotalFloats = Count * ExpectedComponents;
-		Result.SetNum(TotalFloats);
-
-		if (TotalOffset + TotalFloats * sizeof(float) <= (uint32)BinData.Num())
-		{
-			FMemory::Memcpy(Result.GetData(), BinData.GetData() + TotalOffset, TotalFloats * sizeof(float));
-		}
-
-		return Result;
-	};
-
-	// 5. Parse animations
-	const TArray<TSharedPtr<FJsonValue>>* AnimationsArray;
-	if (!Root->TryGetArrayField(TEXT("animations"), AnimationsArray) || AnimationsArray->Num() == 0)
-		return nullptr;
-
-	TSharedPtr<FJsonObject> Anim = (*AnimationsArray)[0]->AsObject();
-	const TArray<TSharedPtr<FJsonValue>>& Channels = Anim->GetArrayField(TEXT("channels"));
-	const TArray<TSharedPtr<FJsonValue>>& Samplers = Anim->GetArrayField(TEXT("samplers"));
-
-	// 6. Collect keyframe data per bone
-	struct FBoneAnimData
-	{
-		TArray<float> TimesT, TimesR, TimesS;
-		TArray<FVector3f> Positions;
-		TArray<FQuat4f> Rotations;
-		TArray<FVector3f> Scales;
-	};
-	TMap<FName, FBoneAnimData> BoneData;
-
-	float MaxTime = 0.0f;
-
-	for (int32 i = 0; i < Channels.Num(); i++)
-	{
-		TSharedPtr<FJsonObject> Channel = Channels[i]->AsObject();
-		int32 SamplerIdx = Channel->GetIntegerField(TEXT("sampler"));
-		TSharedPtr<FJsonObject> Target = Channel->GetObjectField(TEXT("target"));
-		int32 NodeIdx = Target->GetIntegerField(TEXT("node"));
-		FString Path = Target->GetStringField(TEXT("path"));
-
-		if (NodeIdx < 0 || NodeIdx >= NodeNames.Num() || SamplerIdx < 0 || SamplerIdx >= Samplers.Num())
-			continue;
-
-		FName BoneName(*NodeNames[NodeIdx]);
-
-		TSharedPtr<FJsonObject> Sampler = Samplers[SamplerIdx]->AsObject();
-		int32 InputAccessor = Sampler->GetIntegerField(TEXT("input"));
-		int32 OutputAccessor = Sampler->GetIntegerField(TEXT("output"));
-
-		TArray<float> Times = ReadAccessorFloats(InputAccessor, 1);
-		for (float T : Times)
-			MaxTime = FMath::Max(MaxTime, T);
-
-		FBoneAnimData& Data = BoneData.FindOrAdd(BoneName);
-
-		if (Path == TEXT("translation"))
-		{
-			Data.TimesT = Times;
-			TArray<float> Values = ReadAccessorFloats(OutputAccessor, 3);
-			Data.Positions.SetNum(Values.Num() / 3);
-			for (int32 j = 0; j < Data.Positions.Num(); j++)
-				Data.Positions[j] = FVector3f(Values[j * 3], Values[j * 3 + 1], Values[j * 3 + 2]);
-		}
-		else if (Path == TEXT("rotation"))
-		{
-			Data.TimesR = Times;
-			TArray<float> Values = ReadAccessorFloats(OutputAccessor, 4);
-			Data.Rotations.SetNum(Values.Num() / 4);
-			for (int32 j = 0; j < Data.Rotations.Num(); j++)
-				Data.Rotations[j] = FQuat4f(Values[j * 4], Values[j * 4 + 1], Values[j * 4 + 2], Values[j * 4 + 3]);
-		}
-		else if (Path == TEXT("scale"))
-		{
-			Data.TimesS = Times;
-			TArray<float> Values = ReadAccessorFloats(OutputAccessor, 3);
-			Data.Scales.SetNum(Values.Num() / 3);
-			for (int32 j = 0; j < Data.Scales.Num(); j++)
-				Data.Scales[j] = FVector3f(Values[j * 3], Values[j * 3 + 1], Values[j * 3 + 2]);
-		}
-	}
-
-	if (BoneData.Num() == 0 || MaxTime <= 0.0f)
-		return nullptr;
-
-	// 7. Create AnimSequence
-	FString FileName = FPaths::GetBaseFilename(FilePath);
-	FString PackagePath = DestPackagePath / FileName;
-
-	UPackage* Package = CreatePackage(*PackagePath);
-	if (!Package) return nullptr;
-	Package->FullyLoad();
-
-	UAnimSequence* AnimSeq = NewObject<UAnimSequence>(Package, FName(*FileName), RF_Public | RF_Standalone);
-	AnimSeq->SetSkeleton(Skeleton);
-
-	const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
-	UE_LOG(LogTemp, Display, TEXT("    glTF basis for %s: applying fixed glTF-to-UE local transform conversion"), *FileName);
-
-	// 8. Populate bone tracks using IAnimationDataController
-	IAnimationDataController& Controller = AnimSeq->GetController();
-	Controller.InitializeModel();
-	Controller.OpenBracket(FText::FromString(TEXT("Importing glTF animation")), false);
-
-	// Determine frame rate and frame count from keyframe times
-	// Use 30 fps as default, calculate frames from max time
-	FFrameRate FrameRate(30, 1);
-	Controller.SetFrameRate(FrameRate, false);
-	int32 NumFrames = FMath::Max(1, FMath::RoundToInt32(MaxTime * 30.0f));
-	Controller.SetNumberOfFrames(FFrameNumber(NumFrames), false);
-
-	// Create a full track set using the imported skeleton reference pose as the
-	// default local transform. If a parent bone is omitted here, UE falls back
-	// to identity and the hierarchy collapses during evaluation.
-	for (int32 BoneIdx = 0; BoneIdx < RefSkeleton.GetNum(); BoneIdx++)
-	{
-		const FName BoneName = RefSkeleton.GetBoneName(BoneIdx);
-		const FBoneAnimData* Data = BoneData.Find(BoneName);
-
-		// Resample all channels to uniform frame count
-		// Each channel may have different sample counts, so resample to NumFrames+1 keys
-		int32 NumKeys = NumFrames + 1;
-
-		// Helper: resample a channel from arbitrary timestamps to uniform keys
-		auto ResampleVec3 = [&](const TArray<float>& Times, const TArray<FVector3f>& Values, FVector3f Default) -> TArray<FVector3f>
-		{
-			TArray<FVector3f> Result;
-			Result.SetNum(NumKeys);
-			if (Times.Num() == 0 || Values.Num() == 0)
-			{
-				for (int32 k = 0; k < NumKeys; k++) Result[k] = Default;
-				return Result;
-			}
-			for (int32 k = 0; k < NumKeys; k++)
-			{
-				float T = (float)k / 30.0f;
-				// Find surrounding keyframes
-				int32 Idx = 0;
-				while (Idx < Times.Num() - 1 && Times[Idx + 1] <= T) Idx++;
-				if (Idx >= Values.Num() - 1)
-					Result[k] = Values.Last();
-				else if (Times[Idx + 1] == Times[Idx])
-					Result[k] = Values[Idx];
-				else
-				{
-					float Alpha = (T - Times[Idx]) / (Times[Idx + 1] - Times[Idx]);
-					Alpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
-					Result[k] = FMath::Lerp(Values[Idx], Values[Idx + 1], Alpha);
-				}
-			}
-			return Result;
-		};
-
-		auto ResampleQuat = [&](const TArray<float>& Times, const TArray<FQuat4f>& Values, FQuat4f Default) -> TArray<FQuat4f>
-		{
-			TArray<FQuat4f> Result;
-			Result.SetNum(NumKeys);
-			if (Times.Num() == 0 || Values.Num() == 0)
-			{
-				for (int32 k = 0; k < NumKeys; k++) Result[k] = Default;
-				return Result;
-			}
-			for (int32 k = 0; k < NumKeys; k++)
-			{
-				float T = (float)k / 30.0f;
-				int32 Idx = 0;
-				while (Idx < Times.Num() - 1 && Times[Idx + 1] <= T) Idx++;
-				if (Idx >= Values.Num() - 1)
-					Result[k] = Values.Last();
-				else if (Times[Idx + 1] == Times[Idx])
-					Result[k] = Values[Idx];
-				else
-				{
-					float Alpha = (T - Times[Idx]) / (Times[Idx + 1] - Times[Idx]);
-					Alpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
-					Result[k] = FQuat4f::Slerp(Values[Idx], Values[Idx + 1], Alpha);
-				}
-			}
-			return Result;
-		};
-
-		const FTransform DefaultUePose = RefSkeleton.GetRefBonePose()[BoneIdx];
-		const FTransform* GltfBindLocalPtr = GltfBindPoseByBone.Find(BoneName);
-		const FTransform GltfBindLocal = GltfBindLocalPtr ? *GltfBindLocalPtr : FTransform::Identity;
-		const FVector BindTranslation = GltfBindLocal.GetTranslation();
-		FQuat BindRotation = GltfBindLocal.GetRotation();
-		BindRotation.Normalize();
-		const FVector BindScale = GltfBindLocal.GetScale3D();
-		const bool bHasGltfBindPose = (GltfBindLocalPtr != nullptr);
-
-		TArray<FVector3f> GltfPosKeys = ResampleVec3(
-			Data ? Data->TimesT : TArray<float>(),
-			Data ? Data->Positions : TArray<FVector3f>(),
-			FVector3f(BindTranslation));
-		TArray<FQuat4f> GltfRotKeys = ResampleQuat(
-			Data ? Data->TimesR : TArray<float>(),
-			Data ? Data->Rotations : TArray<FQuat4f>(),
-			FQuat4f(BindRotation));
-		TArray<FVector3f> GltfScaleKeys = ResampleVec3(
-			Data ? Data->TimesS : TArray<float>(),
-			Data ? Data->Scales : TArray<FVector3f>(),
-			FVector3f(BindScale));
-
-		TArray<FVector3f> PosKeys;
-		TArray<FQuat4f> RotKeys;
-		TArray<FVector3f> ScaleKeys;
-		PosKeys.SetNum(NumKeys);
-		RotKeys.SetNum(NumKeys);
-		ScaleKeys.SetNum(NumKeys);
-
-		for (int32 KeyIndex = 0; KeyIndex < NumKeys; KeyIndex++)
-		{
-			FQuat KeyRotation = FQuat(GltfRotKeys[KeyIndex]);
-			KeyRotation.Normalize();
-
-			FTransform UeKeyTransform = DefaultUePose;
-			if (bHasGltfBindPose)
-			{
-				const FTransform GltfKeyTransform(
-					KeyRotation,
-					FVector(GltfPosKeys[KeyIndex]),
-					FVector(GltfScaleKeys[KeyIndex]));
-				UeKeyTransform = ConvertGltfLocalTransformToUeBasis(GltfKeyTransform);
-				if (BoneIdx == 0)
-				{
-					UeKeyTransform = UeKeyTransform * GetImportedRootOrientationCorrection();
-				}
-			}
-
-			PosKeys[KeyIndex] = FVector3f(UeKeyTransform.GetTranslation());
-			RotKeys[KeyIndex] = FQuat4f(UeKeyTransform.GetRotation());
-			ScaleKeys[KeyIndex] = FVector3f(UeKeyTransform.GetScale3D());
-		}
-
-		if (!Data || Data->TimesT.Num() == 0)
-		{
-			for (int32 KeyIndex = 0; KeyIndex < NumKeys; KeyIndex++)
-				PosKeys[KeyIndex] = FVector3f(DefaultUePose.GetTranslation());
-		}
-
-		if (!Data || Data->TimesR.Num() == 0)
-		{
-			for (int32 KeyIndex = 0; KeyIndex < NumKeys; KeyIndex++)
-				RotKeys[KeyIndex] = FQuat4f(DefaultUePose.GetRotation());
-		}
-
-		if (!Data || Data->TimesS.Num() == 0)
-		{
-			for (int32 KeyIndex = 0; KeyIndex < NumKeys; KeyIndex++)
-				ScaleKeys[KeyIndex] = FVector3f(DefaultUePose.GetScale3D());
-		}
-
-		Controller.AddBoneCurve(BoneName, false);
-		Controller.SetBoneTrackKeys(BoneName, PosKeys, RotKeys, ScaleKeys, false);
-	}
-
-	Controller.NotifyPopulated();
-	Controller.CloseBracket(false);
-
-	// 9. Save
-	FAssetRegistryModule::AssetCreated(AnimSeq);
-	SavePackage(AnimSeq);
-
-	return AnimSeq;
-}
 
 bool USekiroImportCommandlet::SavePackage(UObject* Asset)
 {

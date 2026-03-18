@@ -110,3 +110,25 @@
 * An edited version of MonoGame Framework where I added support for newer texture types.
 * A small portion of [HavokLib](https://github.com/PredatorCZ/HavokLib), specifically the spline-compressed animation decompressor, adapted for C#
 * A small portion of [Horkrux's copy of my fork of Wulf's BND Rebuilder](https://github.com/horkrux/DeS-BNDBuild), specifically the headerization and deswizzling of PS4 and PS3 textures, adapted for C# and modified to load the texture directly into MonoGame instead of save to a file.
+
+## Sekiro UE5 Export / Import Pipeline
+
+### Environment
+
+| Item | Path |
+|------|------|
+| Sekiro game directory | `C:\Program Files (x86)\Steam\steamapps\common\Sekiro` |
+| UE5 editor commandline | `D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe` |
+| SekiroExporter binary | `E:\Sekiro\DSAnimStudio\SekiroExporter\bin\Release\net6.0-windows\SekiroExporter.exe` |
+| Export output directory | `E:\Sekiro\Export` |
+| UE project | `E:\Sekiro\DSAnimStudio\SekiroSkillEditor\SekiroSkillEditor.uproject` |
+
+### Export c0000
+```
+SekiroExporter.exe export-all --game-dir "C:\Program Files (x86)\Steam\steamapps\common\Sekiro" --chr c0000 --output E:\Sekiro\Export
+```
+
+### Import into UE5
+```
+"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" SekiroSkillEditor.uproject -run=SekiroImport -ExportDir=E:\Sekiro\Export -ChrFilter=c0000 -unattended -nopause -nosplash -nullrhi
+```

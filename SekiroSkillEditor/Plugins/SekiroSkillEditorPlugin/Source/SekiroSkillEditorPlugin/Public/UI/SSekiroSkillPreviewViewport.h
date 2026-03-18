@@ -3,10 +3,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AdvancedPreviewScene.h"
 #include "SEditorViewport.h"
 #include "UObject/GCObject.h"
 
-class FAdvancedPreviewScene;
 class FEditorViewportClient;
 class USekiroSkillDataAsset;
 class ASekiroSkillPreviewActor;

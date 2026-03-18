@@ -71,7 +71,11 @@ void SSekiroSkillPreviewViewport::SetPlaybackEnabled(bool bInIsPlaying)
 void SSekiroSkillPreviewViewport::AddReferencedObjects(FReferenceCollector& Collector)
 {
 	Collector.AddReferencedObject(PreviewActor);
-	Collector.AddReferencedObject(CurrentSkillData.Get());
+	if (CurrentSkillData.IsValid())
+	{
+		USekiroSkillDataAsset* CurrentSkillDataPtr = CurrentSkillData.Get();
+		Collector.AddReferencedObject(CurrentSkillDataPtr);
+	}
 }
 
 FString SSekiroSkillPreviewViewport::GetReferencerName() const

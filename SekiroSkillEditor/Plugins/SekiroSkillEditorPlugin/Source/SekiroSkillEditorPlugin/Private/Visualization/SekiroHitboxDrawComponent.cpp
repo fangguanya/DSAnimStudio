@@ -8,7 +8,7 @@
 
 namespace
 {
-	static bool TryGetIntParam(const FSekiroTaeEvent& Event, const TCHAR* Name, int32& OutValue)
+	static bool TryGetHitboxIntParam(const FSekiroTaeEvent& Event, const TCHAR* Name, int32& OutValue)
 	{
 		if (const FSekiroEventParam* Param = Event.FindParam(Name))
 		{
@@ -73,11 +73,11 @@ namespace
 	static FVector ResolveHitboxCenter(const ASekiroSkillPreviewActor* PreviewActor, const FSekiroTaeEvent& Event, int32 EventIndex, float FallbackRadius)
 	{
 		int32 DummyPolyId = INDEX_NONE;
-		if (TryGetIntParam(Event, TEXT("DummyPolyID"), DummyPolyId)
-			|| TryGetIntParam(Event, TEXT("DummypolyID"), DummyPolyId)
-			|| TryGetIntParam(Event, TEXT("DummyPolyId"), DummyPolyId)
-			|| TryGetIntParam(Event, TEXT("DummyPolyID1"), DummyPolyId)
-			|| TryGetIntParam(Event, TEXT("DummyPolyBladeBaseID"), DummyPolyId))
+		if (TryGetHitboxIntParam(Event, TEXT("DummyPolyID"), DummyPolyId)
+			|| TryGetHitboxIntParam(Event, TEXT("DummypolyID"), DummyPolyId)
+			|| TryGetHitboxIntParam(Event, TEXT("DummyPolyId"), DummyPolyId)
+			|| TryGetHitboxIntParam(Event, TEXT("DummyPolyID1"), DummyPolyId)
+			|| TryGetHitboxIntParam(Event, TEXT("DummyPolyBladeBaseID"), DummyPolyId))
 		{
 			FVector DummyPolyPosition;
 			if (ResolveDummyPolyWorldPosition(PreviewActor, DummyPolyId, DummyPolyPosition))
@@ -148,7 +148,7 @@ void USekiroHitboxDrawComponent::TickComponent(float DeltaTime, ELevelTick TickT
 
 		FVector BaseCenter = ResolveHitboxCenter(PreviewActor, Evt, Idx, HitboxRadius);
 		int32 BladeTipDummyPolyId = INDEX_NONE;
-		if (TryGetIntParam(Evt, TEXT("DummyPolyBladeTipID"), BladeTipDummyPolyId))
+		if (TryGetHitboxIntParam(Evt, TEXT("DummyPolyBladeTipID"), BladeTipDummyPolyId))
 		{
 			FVector TipCenter;
 			if (ResolveDummyPolyWorldPosition(PreviewActor, BladeTipDummyPolyId, TipCenter))

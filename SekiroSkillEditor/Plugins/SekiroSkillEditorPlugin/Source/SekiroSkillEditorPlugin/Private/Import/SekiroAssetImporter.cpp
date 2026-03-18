@@ -519,10 +519,10 @@ TArray<FSekiroTaeEvent> USekiroAssetImporter::ParseTaeEventsFromJson(
 				Param.ByteOffset = ParamObj->GetIntegerField(TEXT("byteOffset"));
 				Param.Source = ParamObj->GetStringField(TEXT("source"));
 
-				const TSharedPtr<FJsonValue>* ValueField = nullptr;
-				if (ParamObj->TryGetField(TEXT("value"), ValueField) && ValueField)
+				const TSharedPtr<FJsonValue> ValueField = ParamObj->TryGetField(TEXT("value"));
+				if (ValueField.IsValid())
 				{
-					Param.ValueJson = SerializeJsonValue(*ValueField);
+					Param.ValueJson = SerializeJsonValue(ValueField);
 					TaeEvent.Parameters.Add(Param.Name, Param.ValueJson);
 				}
 

@@ -335,3 +335,5 @@ SekiroSkillEditor/.vsconfig
 SekiroSkillEditor/DerivedDataCache/
 SekiroSkillEditor/Intermediate/
 SekiroSkillEditor/Saved/
+SekiroSkillEditor/Plugins/SekiroSkillEditorPlugin/Intermediate/
+SekiroSkillEditor/Plugins/SekiroSkillEditorPlugin/Binaries/
