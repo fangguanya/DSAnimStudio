@@ -16,6 +16,7 @@ namespace DSAnimStudio.Export
         public string AnimationSourcePath { get; init; }
         public string AnimationSourceAnibnd { get; init; }
         public string SkillSourceAnibnd { get; init; }
+        public bool RootMotionSourcePresent { get; set; }
         public FormalRootMotionTrack RootMotion { get; set; }
 
         public JObject ToJson()
@@ -33,6 +34,7 @@ namespace DSAnimStudio.Export
                 ["deliverableAnimFileName"] = DeliverableAnimFileName ?? string.Empty,
                 ["animationSourceAnibnd"] = AnimationSourceAnibnd ?? string.Empty,
                 ["skillSourceAnibnd"] = SkillSourceAnibnd ?? string.Empty,
+                ["rootMotionSourcePresent"] = RootMotionSourcePresent,
             };
 
             if (RootMotion != null)

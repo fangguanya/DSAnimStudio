@@ -23,6 +23,7 @@ namespace DSAnimStudio.Export
         {
             public string AnimationName { get; init; }
             public string DeliverableFileName { get; init; }
+            public bool RootMotionSourcePresent { get; init; }
             public FormalRootMotionTrack RootMotion { get; init; }
         }
 
@@ -235,6 +236,7 @@ namespace DSAnimStudio.Export
                 {
                     AnimationName = cleanName,
                     DeliverableFileName = Path.GetFileName(outPath),
+                    RootMotionSourcePresent = animData.RootMotion?.Frames != null && animData.RootMotion.Frames.Length > 0,
                     RootMotion = rootMotion,
                 });
             }

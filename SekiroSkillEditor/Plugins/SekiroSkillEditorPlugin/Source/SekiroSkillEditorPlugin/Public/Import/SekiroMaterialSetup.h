@@ -21,6 +21,21 @@ public:
 		const FString& OutputPackagePath
 	);
 
+	static bool SetupMaterialsFromManifestStrict(
+		const FString& ManifestJsonPath,
+		const FString& TextureDirectory,
+		const FString& OutputPackagePath,
+		TArray<UMaterialInstanceConstant*>& OutCreatedInstances,
+		TArray<FString>& OutErrors
+	);
+
+	static bool BindMaterialsToSkeletalMeshStrict(
+		USkeletalMesh* SkelMesh,
+		const FString& ManifestJsonPath,
+		const FString& ChrContent,
+		TArray<FString>& OutErrors
+	);
+
 	static void BindMaterialsToSkeletalMesh(
 		USkeletalMesh* SkelMesh,
 		const FString& ManifestJsonPath,

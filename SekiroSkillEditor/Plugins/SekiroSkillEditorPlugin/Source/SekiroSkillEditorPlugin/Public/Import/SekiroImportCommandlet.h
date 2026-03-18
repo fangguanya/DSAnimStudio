@@ -22,7 +22,7 @@ public:
 private:
 	// Import via UE5 Interchange (glTF/glb - models AND animations)
 	// Pass a valid Skeleton to import animations only (uses existing skeleton)
-	UObject* ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, class USkeleton* SkeletonOverride = nullptr);
+	UObject* ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, class USkeleton* SkeletonOverride = nullptr, bool bSaveAssetsInDestinationPath = false);
 
 	UObject* ImportTexture(const FString& FilePath, const FString& DestPackagePath);
 

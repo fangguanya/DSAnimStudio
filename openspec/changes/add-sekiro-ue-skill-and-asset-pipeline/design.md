@@ -12,6 +12,22 @@
 
 这项设计跨越多个模块：`SekiroExporter`、导出 JSON/清单 schema、UE Python 导入脚本、`SekiroSkillEditor` 的数据资产与编辑器 UI。它同时涉及新的角色级验收标准，因此需要独立设计文档来固定边界。
 
+## 当前实现快照（2026-03-18）
+
+当前仓库中已经存在以下“基础但未完成”的实现：
+
+- `SekiroExporter` 已输出角色级 `asset_package.json`、`export_report.json`、glTF 模型、glTF 动画、PNG 纹理、`material_manifest.json` 与 `skill_config.json`
+- 动画导出已能解析主角 base ANIBND 及其引用的 supplemental ANIBND，并为技能导出提供共享 animation resolution 与 root-motion 数据
+- UE 导入 commandlet 已导入 SkeletalMesh、Skeleton、纹理、材质实例、动画，并把 `skill_config.json` 导入为角色/技能 DataAsset
+- `SekiroSkillEditor` 已包含全局 Nomad Tab、技能浏览树、时间轴绘制控件、事件检查器、预览 Actor，以及基于 DataAsset 的 DummyPoly / 参数表 / semantic links 读取能力
+
+当前仓库中仍明确存在以下偏差，这些偏差必须由本 change 收紧并消除：
+
+- UE 材质实例当前仍以 `DefaultMaterial` 作为父材质，并保留按文件名后缀自动猜测参数槽位的逻辑；这不满足正式材质装配合同
+- 动画正式成功当前仍可被“导出到至少一个 glTF clip”满足，没有把角色级应导出 clip 集合完整性纳入 formal success
+- 技能会话当前是全局 Nomad Tab 浏览器，而非可双击打开单个技能资产的资产编辑器；`skill_config` 也尚未形成正式回写闭环
+- 角色级验证当前主要检查资产存在性、基础 schema 与基本动画可读性，尚未验证正式 Master Material、完整动画覆盖率、技能编辑器会话和语义级复刻结果
+
 ## 目标 / 非目标
 
 **目标：**
@@ -68,6 +84,16 @@
 
 - 在 UE 脚本中按 `*_n`、`*_s` 等后缀推断纹理用途：被否决，因为这类规则不是正式数据源，且容易被 Sekiro 特定命名破坏
 
+### 决策: UE 材质实例必须绑定到唯一正式 Master Material
+
+正式导入链路不只要求“有材质实例”，还要求所有角色材质实例建立在唯一正式 Master Material 之上，并以 manifest 中的参数键驱动纹理与标量绑定。`DefaultMaterial`、临时父材质或根据当前导入结果即时构造的多个父材质模板都不能进入正式成功路径。
+
+这样做的理由是当前实现已经证明“能创建材质实例”不足以保证 Sekiro 材质能被正确渲染；若父材质不统一，formal manifest 中的参数键就无法形成稳定合同。
+
+考虑过的替代方案：
+
+- 允许先以 `DefaultMaterial` 或临时材质验证纹理是否存在，再在后续步骤替换为正式父材质：被否决，因为这会让正式导入报告在材质语义仍不正确时提前报告成功
+
 ### 决策: 技能复刻以“事件 -> 参数链路 -> DummyPoly/覆盖结果”作为核心数据模型
 
 UE 侧不只需要原始 TAE 事件表，还需要沿着 `BehaviorParam`、`AtkParam`、`SpEffectParam`、`EquipParamWeapon` 以及义手/战技覆盖关系重建技能语义。插件中的时间轴、属性检查器和 3D 视口都必须以这条正式链路为基础数据源。
@@ -113,6 +139,28 @@ Sekiro 动画的 root-motion 不能隐含在“动画看起来能播”里。正
 - 仅导出骨骼动画，不单独描述 root-motion：被否决，因为 UE 端很难判断是导出正确还是因为骨骼偶然看起来接近
 - 在 UE 中从根骨动画临时提取 root-motion：被否决，因为这会把正式语义从导出侧移到导入/预览侧，失去单一真实来源
 
+### 决策: 角色级动画成功必须按“完整解析后的期望 clip 集合”判定
+
+对 Sekiro 角色，尤其是 `c0000` 这类引用 supplemental ANIBND 和共享动作池的角色，正式成功不能只依赖导出目录中“至少存在一些动画文件”。导出链路必须先固定角色级期望 clip 集合，然后逐个验证是否全部导出、是否全部写入摘要、是否全部可被 UE 导入绑定。
+
+这样做的理由是当前代码已经具备解析多个 ANIBND 来源的能力，但若成功条件仍是 `animCount > 0`，就无法把“缺少钩锁动画”这类问题变成 formal failure。
+
+考虑过的替代方案：
+
+- 允许角色级动画完整性只在人工回归时检查：被否决，因为这会让 formal success 与实际可复刻内容长期脱节
+- 对共享动作池动画仅记录 warning：被否决，因为用户要求的是角色级完整复刻，而不是“主流程动作大多可播”
+
+### 决策: 技能数据必须通过资产编辑器式会话打开，而不是仅靠全局浏览 Tab
+
+Sekiro 技能编辑器必须支持对单个技能资产进行双击打开、会话恢复、属性编辑、时间轴联动和保存。这要求最终交互形态是 UE 资产编辑器会话，而不仅是一个从浏览树选择数据的全局 Nomad Tab。
+
+这样做的理由是当前插件已有浏览树、时间轴和预览控件，但它们仍然只是全局 UI 组合，无法满足“技能编辑器”对资产会话边界、回写和用户工作流的要求。
+
+考虑过的替代方案：
+
+- 保留现有 Nomad Tab 作为唯一正式入口：被否决，因为它不能表达“打开某个技能资产”这一正式编辑动作，也无法自然接入 UE 资产编辑器生命周期
+- 继续依赖导入 JSON 后再从浏览器内选择技能：被否决，因为这会让 `skill_config` 与技能资产会话之间缺少稳定的一一对应关系
+
 ### 决策: 验收采用 fail-closed 的角色级验证器
 
 新增 `sekiro-ue-replica-validation` capability，用来定义一个角色只有在以下三类条件同时成立时才算成功：
@@ -144,11 +192,14 @@ Sekiro 动画的 root-motion 不能隐含在“动画看起来能播”里。正
 
 ## Open Questions
 
-- `SekiroSkillEditor` 中正式的 UE Python 脚本目录是放在项目 `Content/Python`、插件目录，还是仓库根目录工具集；实现阶段需要按当前工程结构固定
 - 角色级导出摘要是否需要单独引入版本字段和校验和，以支持 UE 端快速检查资产包是否完整；提案阶段先要求“可追溯且角色级完整”，实现时再定最终字段
-- 对于材质实例所依赖的 Master Material，是否由仓库内提供唯一正式模板，还是由导入脚本在工程内创建；实现阶段需要选择唯一正式路径，禁止双轨并存
 - root-motion 的正式来源是根骨局部动画、角色运动骨，还是导出侧额外摘要；实现阶段必须固定唯一合同并禁止多种提取口径并存
 - UE 自定义时间轴编辑器的回写格式是否直接覆盖 `skill_config.json`，还是导出为与之严格等价的中间资产；实现阶段必须固定唯一正式序列化路径
+
+已解决并固定的实现现实：
+
+- 当前仓库的正式 UE 导入入口以插件 commandlet 为主，而不是独立的外部 Python 目录；规格继续保留 `ue5-import-scripts` 这一 capability 名称，但实现上应以当前 commandlet / 插件导入链路为正式主线收敛
+- 当前仓库已证明 supplemental player ANIBND 解析需要纳入正式动画来源集合，因此后续实现不得回退为只读取 `chr/<chrId>.anibnd.dcx` 的单 ANIBND 路径
 
 ## 继承范围
 

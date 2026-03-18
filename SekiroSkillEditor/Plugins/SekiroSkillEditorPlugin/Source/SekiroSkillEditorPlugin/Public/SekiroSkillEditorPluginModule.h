@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
+class IAssetTypeActions;
+
 /**
  * Main module for the Sekiro Skill Editor plugin.
  * Registers the editor tab, toolbar extension, and associated types.
@@ -23,4 +25,5 @@ private:
 
 	/** Handle returned by the toolbar extender registration; used for cleanup. */
 	TSharedPtr<FExtender> ToolbarExtender;
+	TArray<TSharedPtr<IAssetTypeActions>> RegisteredAssetTypeActions;
 };

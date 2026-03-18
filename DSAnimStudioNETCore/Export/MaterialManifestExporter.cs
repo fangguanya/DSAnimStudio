@@ -15,6 +15,8 @@ namespace DSAnimStudio.Export
     /// </summary>
     public class MaterialManifestExporter
     {
+        public const string FormalMasterMaterialPath = "/Game/SekiroAssets/Materials/M_SekiroMaster.M_SekiroMaster";
+
         private sealed class ManifestMaterialEntry
         {
             public int Index { get; init; }
@@ -64,6 +66,7 @@ namespace DSAnimStudio.Export
             result["deliveryMode"] = "formal-only";
             result["textureFormat"] = textureFileExtension.TrimStart('.');
             result["requiredOutputFormat"] = "png";
+            result["masterMaterialPath"] = FormalMasterMaterialPath;
 
             var materialsArray = new JArray();
             var manifestEntries = new Dictionary<string, ManifestMaterialEntry>(StringComparer.Ordinal);

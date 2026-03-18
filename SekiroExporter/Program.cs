@@ -95,6 +95,7 @@ namespace SekiroExporter
             public bool MaterialManifestSucceeded { get; set; }
             public bool AnimationsSucceeded { get; set; }
             public int AnimationCount { get; set; }
+            public int ExpectedAnimationCount { get; set; }
             public bool TexturesSucceeded { get; set; }
             public int TextureCount { get; set; }
             public bool SkillsSucceeded { get; set; }
@@ -108,6 +109,8 @@ namespace SekiroExporter
             public JToken AssemblyProfile { get; set; }
             public List<FormalAnimationResolution> AnimationResolutions { get; } = new List<FormalAnimationResolution>();
             public List<JObject> TextureEntries { get; } = new List<JObject>();
+            public List<string> MissingAnimationFiles { get; } = new List<string>();
+            public List<string> MissingAnimationRootMotionFiles { get; } = new List<string>();
             private List<FailureEntry> ModelErrors { get; } = new List<FailureEntry>();
             private List<FailureEntry> AnimationErrors { get; } = new List<FailureEntry>();
             private List<FailureEntry> TextureErrors { get; } = new List<FailureEntry>();
@@ -155,7 +158,10 @@ namespace SekiroExporter
                     ["animations"] = new JObject
                     {
                         ["success"] = AnimationsSucceeded,
+                        ["expectedCount"] = ExpectedAnimationCount,
                         ["count"] = AnimationCount,
+                        ["missingFiles"] = new JArray(MissingAnimationFiles.OrderBy(file => file, StringComparer.OrdinalIgnoreCase)),
+                        ["missingRootMotionFiles"] = new JArray(MissingAnimationRootMotionFiles.OrderBy(file => file, StringComparer.OrdinalIgnoreCase)),
                         ["errors"] = SerializeErrors(AnimationErrors),
                     },
                     ["textures"] = new JObject
@@ -827,24 +833,90 @@ namespace SekiroExporter
                                 if (animationResolutionsBySourceAndStem.TryGetValue(resolutionKey, out var matchingResolutions))
                                 {
                                     foreach (var resolution in matchingResolutions)
+                                    {
+                                        resolution.RootMotionSourcePresent = exportRecord.RootMotionSourcePresent;
                                         resolution.RootMotion = exportRecord.RootMotion;
+                                    }
                                 }
                             });
                         Console.WriteLine();
                     }
 
-                    int animCount = Directory.GetFiles(animDir, "*.gltf").Length;
-                    report.AnimationCount = animCount;
-                    report.AnimationsSucceeded = animCount > 0;
+                    var exportedAnimationFiles = Directory.GetFiles(animDir, "*.gltf")
+                        .Select(Path.GetFileName)
+                        .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(fileName => fileName, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    var expectedAnimationFiles = formalAnimationResolutions
+                        .Select(resolution => resolution?.DeliverableAnimFileName)
+                        .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(fileName => fileName, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    if (expectedAnimationFiles.Count == 0 && exportPlan.Count > 0)
+                    {
+                        expectedAnimationFiles = exportPlan
+                            .SelectMany(plan => plan.Stems)
+                            .Where(stem => !string.IsNullOrWhiteSpace(stem))
+                            .Select(stem => $"{stem}.gltf")
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .OrderBy(fileName => fileName, StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                    }
+
+                    report.ExpectedAnimationCount = expectedAnimationFiles.Count;
+                    report.AnimationCount = exportedAnimationFiles.Count;
+                    report.MissingAnimationFiles.Clear();
+                    report.MissingAnimationFiles.AddRange(expectedAnimationFiles.Except(exportedAnimationFiles, StringComparer.OrdinalIgnoreCase));
+                    report.MissingAnimationRootMotionFiles.Clear();
+                    report.MissingAnimationRootMotionFiles.AddRange(formalAnimationResolutions
+                        .Where(resolution => resolution != null
+                            && !string.IsNullOrWhiteSpace(resolution.DeliverableAnimFileName)
+                            && expectedAnimationFiles.Contains(resolution.DeliverableAnimFileName, StringComparer.OrdinalIgnoreCase)
+                            && resolution.RootMotionSourcePresent
+                            && resolution.RootMotion == null)
+                        .Select(resolution => resolution.DeliverableAnimFileName)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(fileName => fileName, StringComparer.OrdinalIgnoreCase));
+
+                    if (report.ExpectedAnimationCount == 0)
+                    {
+                        const string message = "Formal animation export did not produce an expected clip set.";
+                        report.AddAnimationError("ANIMATION_EXPECTATION_EMPTY", message);
+                        assetPackage.GetOrAdd("animations").FailureReasons.Add(message);
+                    }
+
+                    if (report.MissingAnimationFiles.Count > 0)
+                    {
+                        string message = $"Missing formal animation clips: {string.Join(", ", report.MissingAnimationFiles)}";
+                        report.AddAnimationError("ANIMATION_DELIVERABLE_MISSING", message);
+                        assetPackage.GetOrAdd("animations").FailureReasons.Add(message);
+                    }
+
+                    if (report.MissingAnimationRootMotionFiles.Count > 0)
+                    {
+                        string message = $"Missing formal root-motion tracks: {string.Join(", ", report.MissingAnimationRootMotionFiles)}";
+                        report.AddAnimationError("ANIMATION_ROOT_MOTION_MISSING", message);
+                        assetPackage.GetOrAdd("animations").FailureReasons.Add(message);
+                    }
+
+                    report.AnimationsSucceeded = report.ExpectedAnimationCount > 0
+                        && report.MissingAnimationFiles.Count == 0
+                        && report.MissingAnimationRootMotionFiles.Count == 0;
                     var animationDeliverable = assetPackage.GetOrAdd("animations");
                     animationDeliverable.Format = "gltf2";
-                    animationDeliverable.FileCount = animCount;
+                    animationDeliverable.FileCount = exportedAnimationFiles.Count;
                     animationDeliverable.RelativePath = "Animations";
-                    foreach (string animationPath in Directory.GetFiles(animDir, "*.gltf").OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
-                        animationDeliverable.Files.Add(Path.Combine("Animations", Path.GetFileName(animationPath)).Replace('\\', '/'));
+                    animationDeliverable.Files.Clear();
+                    foreach (string animationFileName in exportedAnimationFiles)
+                        animationDeliverable.Files.Add(Path.Combine("Animations", animationFileName).Replace('\\', '/'));
                     if (report.AnimationsSucceeded)
                         animationDeliverable.Status = "ready";
-                    Console.WriteLine($"  ✓ Animations: {animCount} formal clips exported");
+                    else
+                        animationDeliverable.Status = "failed";
+                    Console.WriteLine($"  {(report.AnimationsSucceeded ? '✓' : '✗')} Animations: {exportedAnimationFiles.Count}/{report.ExpectedAnimationCount} formal clips exported");
                 }
                 catch (Exception ex)
                 {

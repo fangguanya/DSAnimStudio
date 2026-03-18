@@ -9,6 +9,7 @@
 #include "UObject/SavePackage.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialInterface.h"
 #include "Engine/Texture2D.h"
 #include "Engine/SkeletalMesh.h"
 #include "EditorAssetLibrary.h"
@@ -44,57 +45,15 @@ namespace SekiroMaterialSetupInternal
 		return MaterialKey;
 	}
 
-	static void AutoBindTexturesToMaterial(
-		UMaterialInstanceConstant* MatInstance,
-		const FString& SlotName,
-		const FString& TexturesPackagePath)
+	static FString GetFormalMasterMaterialPath(const TSharedPtr<FJsonObject>& RootObject)
 	{
-		if (!MatInstance) return;
-
-		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-
-		TArray<FAssetData> AllTextures;
-		AssetRegistry.GetAssetsByPath(FName(*TexturesPackagePath), AllTextures, false);
-
-		for (const FAssetData& TexData : AllTextures)
+		FString ManifestPath;
+		if (RootObject.IsValid() && RootObject->TryGetStringField(TEXT("masterMaterialPath"), ManifestPath) && !ManifestPath.IsEmpty())
 		{
-			UTexture2D* Tex = Cast<UTexture2D>(TexData.GetAsset());
-			if (!Tex) continue;
-
-			const FString TexName = TexData.AssetName.ToString();
-			const FString TexNameLower = TexName.ToLower();
-			const FString SlotLower = SlotName.ToLower();
-
-			bool bMatches = TexNameLower.Contains(SlotLower);
-
-			if (!bMatches) continue;
-
-			if (TexNameLower.EndsWith(TEXT("_a")) || TexNameLower.EndsWith(TEXT("_ao_a")))
-			{
-				MatInstance->SetTextureParameterValueEditorOnly(FName("BaseColor"), Tex);
-			}
-			else if (TexNameLower.EndsWith(TEXT("_n")))
-			{
-				MatInstance->SetTextureParameterValueEditorOnly(FName("Normal"), Tex);
-			}
-			else if (TexNameLower.EndsWith(TEXT("_m")) || TexNameLower.EndsWith(TEXT("_1m")))
-			{
-				MatInstance->SetTextureParameterValueEditorOnly(FName("Metallic"), Tex);
-			}
-			else if (TexNameLower.EndsWith(TEXT("_em")))
-			{
-				MatInstance->SetTextureParameterValueEditorOnly(FName("Emissive"), Tex);
-			}
-			else if (TexNameLower.EndsWith(TEXT("_d")))
-			{
-				MatInstance->SetTextureParameterValueEditorOnly(FName("Roughness"), Tex);
-			}
-			else if (TexNameLower.EndsWith(TEXT("_3m")))
-			{
-				MatInstance->SetTextureParameterValueEditorOnly(FName("Specular"), Tex);
-			}
+			return ManifestPath;
 		}
+
+		return TEXT("/Game/SekiroAssets/Materials/M_SekiroMaster.M_SekiroMaster");
 	}
 }
 
@@ -104,35 +63,54 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 	const FString& OutputPackagePath)
 {
 	TArray<UMaterialInstanceConstant*> CreatedInstances;
+	TArray<FString> Errors;
+	SetupMaterialsFromManifestStrict(ManifestJsonPath, TextureDirectory, OutputPackagePath, CreatedInstances, Errors);
+	for (const FString& Error : Errors)
+	{
+		UE_LOG(LogTemp, Error, TEXT("SekiroMaterialSetup: %s"), *Error);
+	}
+	return CreatedInstances;
+}
+
+bool USekiroMaterialSetup::SetupMaterialsFromManifestStrict(
+	const FString& ManifestJsonPath,
+	const FString& TextureDirectory,
+	const FString& OutputPackagePath,
+	TArray<UMaterialInstanceConstant*>& OutCreatedInstances,
+	TArray<FString>& OutErrors)
+{
+	OutCreatedInstances.Reset();
+	OutErrors.Reset();
 
 	FString JsonString;
 	if (!FFileHelper::LoadFileToString(JsonString, *ManifestJsonPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("SekiroMaterialSetup: Failed to read manifest: %s"), *ManifestJsonPath);
-		return CreatedInstances;
+		OutErrors.Add(FString::Printf(TEXT("Failed to read manifest: %s"), *ManifestJsonPath));
+		return false;
 	}
 
 	TSharedPtr<FJsonObject> RootObject;
 	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
 	if (!FJsonSerializer::Deserialize(Reader, RootObject) || !RootObject.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("SekiroMaterialSetup: Failed to parse manifest JSON: %s"), *ManifestJsonPath);
-		return CreatedInstances;
+		OutErrors.Add(FString::Printf(TEXT("Failed to parse manifest JSON: %s"), *ManifestJsonPath));
+		return false;
 	}
 
-	UMaterial* ParentMaterial = Cast<UMaterial>(
-		StaticLoadObject(UMaterial::StaticClass(), nullptr, TEXT("/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial")));
+	const FString ParentMaterialPath = SekiroMaterialSetupInternal::GetFormalMasterMaterialPath(RootObject);
+	UMaterialInterface* ParentMaterial = Cast<UMaterialInterface>(
+		StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, *ParentMaterialPath));
 	if (!ParentMaterial)
 	{
-		UE_LOG(LogTemp, Error, TEXT("SekiroMaterialSetup: Failed to load parent material."));
-		return CreatedInstances;
+		OutErrors.Add(FString::Printf(TEXT("Formal master material is missing: %s"), *ParentMaterialPath));
+		return false;
 	}
 
 	const TArray<TSharedPtr<FJsonValue>>* MaterialsArray = nullptr;
 	if (!RootObject->TryGetArrayField(TEXT("materials"), MaterialsArray))
 	{
-		UE_LOG(LogTemp, Error, TEXT("SekiroMaterialSetup: Manifest missing 'materials' array."));
-		return CreatedInstances;
+		OutErrors.Add(TEXT("Manifest missing 'materials' array."));
+		return false;
 	}
 
 	const FString TexturesPackagePath = OutputPackagePath / TEXT("Textures");
@@ -141,11 +119,19 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 	for (const TSharedPtr<FJsonValue>& MaterialValue : *MaterialsArray)
 	{
 		const TSharedPtr<FJsonObject>& MaterialObj = MaterialValue->AsObject();
-		if (!MaterialObj.IsValid()) continue;
+		if (!MaterialObj.IsValid())
+		{
+			OutErrors.Add(TEXT("Encountered invalid material entry in manifest."));
+			continue;
+		}
 
 		FString SlotName;
 		MaterialObj->TryGetStringField(TEXT("slotName"), SlotName);
-		if (SlotName.IsEmpty()) continue;
+		if (SlotName.IsEmpty())
+		{
+			OutErrors.Add(TEXT("Manifest material entry is missing slotName."));
+			continue;
+		}
 
 		const FString AssetName = SekiroMaterialSetupInternal::GetMaterialInstanceAssetName(MaterialObj);
 
@@ -158,33 +144,55 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 		if (!Package) continue;
 		Package->FullyLoad();
 
-		UMaterialInstanceConstant* MatInstance = NewObject<UMaterialInstanceConstant>(
-			Package, *AssetName, RF_Public | RF_Standalone);
+		UMaterialInstanceConstant* MatInstance = FindObject<UMaterialInstanceConstant>(Package, *AssetName);
+		if (!MatInstance)
+		{
+			MatInstance = NewObject<UMaterialInstanceConstant>(Package, *AssetName, RF_Public | RF_Standalone);
+		}
 		if (!MatInstance) continue;
 
 		MatInstance->SetParentEditorOnly(ParentMaterial);
+		const int32 ErrorCountBeforeMaterial = OutErrors.Num();
 
 		const TSharedPtr<FJsonObject>* TextureBindingsObj = nullptr;
-		if (MaterialObj->TryGetObjectField(TEXT("textureBindings"), TextureBindingsObj))
+		if (MaterialObj->TryGetObjectField(TEXT("textureBindings"), TextureBindingsObj) && TextureBindingsObj && TextureBindingsObj->IsValid())
 		{
 			for (const auto& BindingPair : (*TextureBindingsObj)->Values)
 			{
 				const FString& ParameterName = BindingPair.Key;
 				const TSharedPtr<FJsonObject> BindingObj = BindingPair.Value->AsObject();
-				if (!BindingObj.IsValid()) continue;
+				if (!BindingObj.IsValid())
+				{
+					OutErrors.Add(FString::Printf(TEXT("Material '%s' has invalid texture binding '%s'."), *AssetName, *ParameterName));
+					continue;
+				}
 
 				FString TextureFilename;
-				if (!BindingObj->TryGetStringField(TEXT("exportedFileName"), TextureFilename) || TextureFilename.IsEmpty()) continue;
+				if (!BindingObj->TryGetStringField(TEXT("exportedFileName"), TextureFilename) || TextureFilename.IsEmpty())
+				{
+					OutErrors.Add(FString::Printf(TEXT("Material '%s' binding '%s' is missing exportedFileName."), *AssetName, *ParameterName));
+					continue;
+				}
 
 				const FString TexBaseName = FPaths::GetBaseFilename(TextureFilename);
 				if (UTexture2D* Tex = SekiroMaterialSetupInternal::FindTextureAsset(TexBaseName, TexturesPackagePath))
 				{
 					MatInstance->SetTextureParameterValueEditorOnly(FName(*ParameterName), Tex);
 				}
+				else
+				{
+					OutErrors.Add(FString::Printf(TEXT("Material '%s' binding '%s' references missing texture asset '%s'."), *AssetName, *ParameterName, *TexBaseName));
+				}
 			}
 		}
-
-		SekiroMaterialSetupInternal::AutoBindTexturesToMaterial(MatInstance, SlotName, TexturesPackagePath);
+		else
+		{
+			const TArray<TSharedPtr<FJsonValue>>* TexturesArray = nullptr;
+			if (MaterialObj->TryGetArrayField(TEXT("textures"), TexturesArray) && TexturesArray && TexturesArray->Num() > 0)
+			{
+				OutErrors.Add(FString::Printf(TEXT("Material '%s' is missing formal textureBindings."), *AssetName));
+			}
+		}
 
 		const TSharedPtr<FJsonObject>* ScalarsObj = nullptr;
 		if (MaterialObj->TryGetObjectField(TEXT("scalarParameters"), ScalarsObj))
@@ -199,6 +207,11 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 			}
 		}
 
+		if (OutErrors.Num() > ErrorCountBeforeMaterial)
+		{
+			continue;
+		}
+
 		MatInstance->PostEditChange();
 		MatInstance->MarkPackageDirty();
 		FAssetRegistryModule::AssetCreated(MatInstance);
@@ -209,11 +222,11 @@ TArray<UMaterialInstanceConstant*> USekiroMaterialSetup::SetupMaterialsFromManif
 		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 		UPackage::SavePackage(Package, MatInstance, *PackageFilename, SaveArgs);
 
-		CreatedInstances.Add(MatInstance);
+		OutCreatedInstances.Add(MatInstance);
 	}
 
-	UE_LOG(LogTemp, Display, TEXT("SekiroMaterialSetup: Created %d material instances."), CreatedInstances.Num());
-	return CreatedInstances;
+	UE_LOG(LogTemp, Display, TEXT("SekiroMaterialSetup: Created %d material instances."), OutCreatedInstances.Num());
+	return OutErrors.Num() == 0;
 }
 
 void USekiroMaterialSetup::BindMaterialsToSkeletalMesh(
@@ -221,17 +234,48 @@ void USekiroMaterialSetup::BindMaterialsToSkeletalMesh(
 	const FString& ManifestJsonPath,
 	const FString& ChrContent)
 {
-	if (!SkelMesh) return;
+	TArray<FString> Errors;
+	BindMaterialsToSkeletalMeshStrict(SkelMesh, ManifestJsonPath, ChrContent, Errors);
+	for (const FString& Error : Errors)
+	{
+		UE_LOG(LogTemp, Error, TEXT("SekiroMaterialSetup: %s"), *Error);
+	}
+}
+
+bool USekiroMaterialSetup::BindMaterialsToSkeletalMeshStrict(
+	USkeletalMesh* SkelMesh,
+	const FString& ManifestJsonPath,
+	const FString& ChrContent,
+	TArray<FString>& OutErrors)
+{
+	OutErrors.Reset();
+	if (!SkelMesh)
+	{
+		OutErrors.Add(TEXT("Cannot bind materials to a null skeletal mesh."));
+		return false;
+	}
 
 	FString JsonString;
-	if (!FFileHelper::LoadFileToString(JsonString, *ManifestJsonPath)) return;
+	if (!FFileHelper::LoadFileToString(JsonString, *ManifestJsonPath))
+	{
+		OutErrors.Add(FString::Printf(TEXT("Failed to read manifest for skeletal mesh binding: %s"), *ManifestJsonPath));
+		return false;
+	}
 
 	TSharedPtr<FJsonObject> RootObject;
 	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
-	if (!FJsonSerializer::Deserialize(Reader, RootObject) || !RootObject.IsValid()) return;
+	if (!FJsonSerializer::Deserialize(Reader, RootObject) || !RootObject.IsValid())
+	{
+		OutErrors.Add(FString::Printf(TEXT("Failed to parse manifest JSON for skeletal mesh binding: %s"), *ManifestJsonPath));
+		return false;
+	}
 
 	const TArray<TSharedPtr<FJsonValue>>* MaterialsArray = nullptr;
-	if (!RootObject->TryGetArrayField(TEXT("materials"), MaterialsArray)) return;
+	if (!RootObject->TryGetArrayField(TEXT("materials"), MaterialsArray) || !MaterialsArray)
+	{
+		OutErrors.Add(TEXT("Manifest missing 'materials' array for skeletal mesh binding."));
+		return false;
+	}
 
 	TMap<FString, UMaterialInterface*> SlotToMaterial;
 
@@ -251,12 +295,21 @@ void USekiroMaterialSetup::BindMaterialsToSkeletalMesh(
 		{
 			SlotToMaterial.Add(SlotName, Mat);
 		}
+		else
+		{
+			OutErrors.Add(FString::Printf(TEXT("Manifest slot '%s' expected material instance '%s' but it was not created."), *SlotName, *AssetName));
+		}
 	}
 
-	if (SlotToMaterial.Num() == 0) return;
+	if (SlotToMaterial.Num() == 0)
+	{
+		OutErrors.Add(TEXT("No formal material instances were available for skeletal mesh binding."));
+		return false;
+	}
 
 	TArray<FSkeletalMaterial>& Materials = SkelMesh->GetMaterials();
 	bool bChanged = false;
+	TSet<FString> BoundSlots;
 
 	for (FSkeletalMaterial& SkelMat : Materials)
 	{
@@ -265,7 +318,20 @@ void USekiroMaterialSetup::BindMaterialsToSkeletalMesh(
 		{
 			SkelMat.MaterialInterface = *Found;
 			bChanged = true;
+			BoundSlots.Add(MatSlotName);
 			UE_LOG(LogTemp, Display, TEXT("  BindMat: slot '%s' -> %s"), *MatSlotName, *(*Found)->GetName());
+		}
+		else
+		{
+			OutErrors.Add(FString::Printf(TEXT("Skeletal mesh slot '%s' has no formal manifest binding."), *MatSlotName));
+		}
+	}
+
+	for (const TPair<FString, UMaterialInterface*>& Pair : SlotToMaterial)
+	{
+		if (!BoundSlots.Contains(Pair.Key))
+		{
+			OutErrors.Add(FString::Printf(TEXT("Manifest slot '%s' was not found on the skeletal mesh."), *Pair.Key));
 		}
 	}
 
@@ -273,4 +339,6 @@ void USekiroMaterialSetup::BindMaterialsToSkeletalMesh(
 	{
 		SkelMesh->MarkPackageDirty();
 	}
+
+	return OutErrors.Num() == 0;
 }

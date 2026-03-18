@@ -26,6 +26,7 @@
 #include "Import/SekiroAssetImporter.h"
 #include "Import/SekiroMaterialSetup.h"
 #include "Data/SekiroCharacterData.h"
+#include "Data/SekiroSkillDataAsset.h"
 
 namespace
 {
@@ -391,6 +392,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 {
 	FString ChrContent = ContentBase / ChrId;
 	int32 TexCount = 0, AnimCount = 0;
+	const int32 ExpectedAnimationCount = AnimationFiles.Num();
 	TArray<FString> Errors;
 
 	TSharedPtr<FJsonObject> AssetPackage;
@@ -455,7 +457,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 
 		if (Extension == TEXT("gltf") || Extension == TEXT("glb"))
 		{
-			Result = ImportViaAssetTask(ModelFile, ChrContent / TEXT("Mesh"));
+			Result = ImportViaAssetTask(ModelFile, ChrContent / TEXT("Mesh"), nullptr, true);
 		}
 		else
 		{
@@ -533,6 +535,11 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		if (bHasAnimations)
 			UE_LOG(LogTemp, Display, TEXT("  Animations: %d"), AnimCount);
 
+		if (bHasAnimations && AnimCount != ExpectedAnimationCount)
+		{
+			Errors.Add(FString::Printf(TEXT("animation coverage mismatch: imported %d of %d expected clips"), AnimCount, ExpectedAnimationCount));
+		}
+
 		if (AnimCount > 30)
 			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 	}
@@ -545,11 +552,16 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	// 4. Create material instances and bind CharacterData slots from the formal manifest
 	if (bHasMaterialManifest)
 	{
-		TArray<UMaterialInstanceConstant*> MaterialInstances = USekiroMaterialSetup::SetupMaterialsFromManifest(
+		TArray<UMaterialInstanceConstant*> MaterialInstances;
+		TArray<FString> MaterialErrors;
+		USekiroMaterialSetup::SetupMaterialsFromManifestStrict(
 			MaterialManifestFiles[0],
 			ExportDir / TEXT("Textures"),
-			ChrContent);
+			ChrContent,
+			MaterialInstances,
+			MaterialErrors);
 		UE_LOG(LogTemp, Display, TEXT("  Materials: %d"), MaterialInstances.Num());
+		Errors.Append(MaterialErrors);
 
 		// Bind MI_* to SkeletalMesh slots
 		if (Skeleton)
@@ -562,7 +574,9 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			{
 				if (USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(AssetData.GetAsset()))
 				{
-					USekiroMaterialSetup::BindMaterialsToSkeletalMesh(SkelMesh, MaterialManifestFiles[0], ChrContent);
+					TArray<FString> BindErrors;
+					USekiroMaterialSetup::BindMaterialsToSkeletalMeshStrict(SkelMesh, MaterialManifestFiles[0], ChrContent, BindErrors);
+					Errors.Append(BindErrors);
 					SavePackage(SkelMesh);
 					break;
 				}
@@ -583,6 +597,19 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		IFileManager::Get().Copy(*SkillDst, *SkillSrc, true);
 		TArray<USekiroSkillDataAsset*> ImportedSkillAssets = USekiroAssetImporter::ImportSkillConfig(SkillSrc, ChrContent / TEXT("Skills"));
 		UE_LOG(LogTemp, Display, TEXT("  Skills: imported %d skill assets"), ImportedSkillAssets.Num());
+		for (USekiroSkillDataAsset* SkillAsset : ImportedSkillAssets)
+		{
+			if (!SkillAsset)
+			{
+				Errors.Add(TEXT("skill import returned a null skill asset"));
+				continue;
+			}
+
+			if (SkillAsset->Animation.IsNull())
+			{
+				Errors.Add(FString::Printf(TEXT("skill asset '%s' is missing imported animation '%s'"), *SkillAsset->GetName(), *SkillAsset->SourceFileName));
+			}
+		}
 
 		if (USekiroCharacterData* CharacterData = LoadCharacterDataAsset(ChrContent, ChrId))
 		{
@@ -609,6 +636,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	ReportObject->SetBoolField(TEXT("modelImported"), !ModelFile.IsEmpty() && Skeleton != nullptr);
 	ReportObject->SetBoolField(TEXT("skeletonImported"), Skeleton != nullptr);
 	ReportObject->SetNumberField(TEXT("textureCount"), TexCount);
+	ReportObject->SetNumberField(TEXT("expectedAnimationCount"), ExpectedAnimationCount);
 	ReportObject->SetNumberField(TEXT("animationCount"), AnimCount);
 	TArray<TSharedPtr<FJsonValue>> ErrorValues;
 	for (const FString& Error : Errors)
@@ -623,7 +651,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	FFileHelper::SaveStringToFile(ReportText, *(ExportDir / TEXT("ue_import_report.json")));
 }
 
-UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, USkeleton* SkeletonOverride)
+UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, USkeleton* SkeletonOverride, bool bSaveAssetsInDestinationPath)
 {
 	// Use UInterchangeManager directly to avoid AssetTools/ContentBrowser notification
 	// that crashes in commandlet mode (Slate not initialized)
@@ -685,18 +713,21 @@ UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, co
 		}
 	}
 
-	// Interchange can create related assets (Skeleton, SkeletalMesh, Materials, Textures)
-	// without returning all of them in ImportedObjects. Save everything created under the
-	// destination package path so later commandlet runs see the same on-disk assets.
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-	TArray<FAssetData> AssetsInPath;
-	AssetRegistry.GetAssetsByPath(FName(*DestPackagePath), AssetsInPath, true);
-	for (const FAssetData& AssetData : AssetsInPath)
+	// Model import creates related assets outside the returned object list.
+	// Animation import does not need a recursive resave of the entire folder, which
+	// causes repeated rewrites of every prior sequence and eventually file-lock failures.
+	if (bSaveAssetsInDestinationPath)
 	{
-		if (UObject* Asset = AssetData.GetAsset())
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+		TArray<FAssetData> AssetsInPath;
+		AssetRegistry.GetAssetsByPath(FName(*DestPackagePath), AssetsInPath, true);
+		for (const FAssetData& AssetData : AssetsInPath)
 		{
-			SavePackage(Asset);
+			if (UObject* Asset = AssetData.GetAsset())
+			{
+				SavePackage(Asset);
+			}
 		}
 	}
 
