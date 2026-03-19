@@ -7,6 +7,7 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimData/IAnimationDataModel.h"
 #include "Materials/MaterialInstance.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
@@ -14,6 +15,7 @@
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
+#include "Math/UnrealMathUtility.h"
 
 USekiroValidationCommandlet::USekiroValidationCommandlet()
 {
@@ -21,6 +23,43 @@ USekiroValidationCommandlet::USekiroValidationCommandlet()
 	IsEditor = true;
 	IsServer = false;
 	LogToConsole = true;
+}
+
+namespace
+{
+	static bool LoadJsonObjectFromFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject)
+	{
+		FString JsonString;
+		if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
+		{
+			return false;
+		}
+
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+		return FJsonSerializer::Deserialize(Reader, OutObject) && OutObject.IsValid();
+	}
+
+	static FString GetMaterialInstanceAssetName(const TSharedPtr<FJsonObject>& MaterialObj)
+	{
+		FString MaterialKey;
+		if (!MaterialObj->TryGetStringField(TEXT("materialInstanceKey"), MaterialKey) || MaterialKey.IsEmpty())
+		{
+			MaterialObj->TryGetStringField(TEXT("slotName"), MaterialKey);
+		}
+		if (MaterialKey.IsEmpty())
+		{
+			MaterialObj->TryGetStringField(TEXT("name"), MaterialKey);
+		}
+		MaterialKey.ReplaceInline(TEXT(" "), TEXT("_"));
+		MaterialKey.ReplaceInline(TEXT("|"), TEXT("_"));
+		MaterialKey.ReplaceInline(TEXT("#"), TEXT("_"));
+
+		if (!MaterialKey.StartsWith(TEXT("MI_")))
+		{
+			return FString::Printf(TEXT("MI_%s"), *MaterialKey);
+		}
+		return MaterialKey;
+	}
 }
 
 int32 USekiroValidationCommandlet::FCharacterValidation::GetErrorCount() const
@@ -33,6 +72,7 @@ int32 USekiroValidationCommandlet::FCharacterValidation::GetErrorCount() const
 	Errors += AnimsWithZeroDuration;
 	Errors += AnimsWithZeroTracks;
 	Errors += AnimsWithWrongSkeleton;
+	Errors += MaterialBindingErrors;
 	Errors += SkillSchemaErrors;
 	// TexturesWithZeroSize excluded: GetSizeX() returns 0 in commandlet/headless mode (no GPU)
 	return Errors;
@@ -142,6 +182,9 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 		CharacterReport->SetNumberField(TEXT("animationCount"), V.AnimSequenceCount);
 		CharacterReport->SetNumberField(TEXT("textureCount"), V.TextureCount);
 		CharacterReport->SetNumberField(TEXT("materialCount"), V.MaterialCount);
+		CharacterReport->SetNumberField(TEXT("expectedMaterialTextureBindings"), V.ExpectedMaterialTextureBindings);
+		CharacterReport->SetNumberField(TEXT("resolvedMaterialTextureBindings"), V.ResolvedMaterialTextureBindings);
+		CharacterReport->SetNumberField(TEXT("materialBindingErrors"), V.MaterialBindingErrors);
 		CharacterReport->SetBoolField(TEXT("hasSkillConfig"), V.bHasSkillConfig);
 		CharacterReport->SetNumberField(TEXT("skillEventCount"), V.SkillEventCount);
 		CharacterReport->SetNumberField(TEXT("errorCount"), V.GetErrorCount());
@@ -210,6 +253,8 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d animations with zero bone tracks"), *ChrId, V.AnimsWithZeroTracks));
 		if (V.AnimsWithWrongSkeleton > 0)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d animations reference the wrong or missing skeleton"), *ChrId, V.AnimsWithWrongSkeleton));
+		if (V.MaterialBindingErrors > 0)
+			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d material texture bindings failed manifest validation"), *ChrId, V.MaterialBindingErrors));
 		if (V.SkillSchemaErrors > 0)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: skill_config.json has %d canonical schema violations"), *ChrId, V.SkillSchemaErrors));
 		// TexturesWithZeroSize not reported — false positive in headless mode
@@ -223,6 +268,7 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 		// Count errors: exported models must yield skeletal assets, not static fallbacks.
 		int32 ChrErrors = V.AnimsWithZeroDuration + V.AnimsWithZeroTracks;
 		ChrErrors += V.AnimsWithWrongSkeleton;
+		ChrErrors += V.MaterialBindingErrors;
 		ChrErrors += V.SkillSchemaErrors;
 		if (V.bHasSkeletalMesh && !V.bHasPhysicsAsset)
 			ChrErrors++;
@@ -445,6 +491,101 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 		{
 			if (Cast<UMaterialInterface>(AssetData.GetAsset()))
 				V.MaterialCount++;
+		}
+
+		const FString ManifestPath = ExportDir / ChrId / TEXT("Model/material_manifest.json");
+		TSharedPtr<FJsonObject> ManifestRoot;
+		if (LoadJsonObjectFromFile(ManifestPath, ManifestRoot))
+		{
+			const TArray<TSharedPtr<FJsonValue>>* MaterialsArray = nullptr;
+			if (ManifestRoot->TryGetArrayField(TEXT("materials"), MaterialsArray) && MaterialsArray)
+			{
+				for (const TSharedPtr<FJsonValue>& MaterialValue : *MaterialsArray)
+				{
+					const TSharedPtr<FJsonObject> MaterialObj = MaterialValue->AsObject();
+					if (!MaterialObj.IsValid())
+					{
+						continue;
+					}
+
+					const FString AssetName = GetMaterialInstanceAssetName(MaterialObj);
+					const FString AssetPath = FString::Printf(TEXT("%s/Materials/%s.%s"), *ChrContent, *AssetName, *AssetName);
+					UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(StaticLoadObject(UMaterialInstance::StaticClass(), nullptr, *AssetPath));
+					if (!MaterialInstance)
+					{
+						V.MaterialBindingErrors++;
+						UE_LOG(LogTemp, Error, TEXT("Validation: material instance missing for manifest entry '%s' at %s"), *AssetName, *AssetPath);
+						continue;
+					}
+
+					const TSharedPtr<FJsonObject>* TextureBindingsObj = nullptr;
+					if (!MaterialObj->TryGetObjectField(TEXT("textureBindings"), TextureBindingsObj) || !TextureBindingsObj || !TextureBindingsObj->IsValid())
+					{
+						continue;
+					}
+
+					for (const auto& BindingPair : (*TextureBindingsObj)->Values)
+					{
+						const TSharedPtr<FJsonObject> BindingObj = BindingPair.Value->AsObject();
+						if (!BindingObj.IsValid())
+						{
+							V.MaterialBindingErrors++;
+							continue;
+						}
+
+						V.ExpectedMaterialTextureBindings++;
+						FString ExportedFileName;
+						BindingObj->TryGetStringField(TEXT("exportedFileName"), ExportedFileName);
+						const FString ExpectedTextureName = FPaths::GetBaseFilename(ExportedFileName);
+
+						UTexture* BoundTexture = nullptr;
+						const bool bResolved = MaterialInstance->GetTextureParameterValue(FMaterialParameterInfo(*BindingPair.Key), BoundTexture);
+						if (!bResolved || !BoundTexture)
+						{
+							V.MaterialBindingErrors++;
+							UE_LOG(LogTemp, Error, TEXT("Validation: material '%s' parameter '%s' is unresolved. Expected texture '%s'."), *AssetName, *BindingPair.Key, *ExpectedTextureName);
+							continue;
+						}
+
+						V.ResolvedMaterialTextureBindings++;
+						if (!ExpectedTextureName.IsEmpty() && BoundTexture->GetName() != ExpectedTextureName)
+						{
+							V.MaterialBindingErrors++;
+							UE_LOG(LogTemp, Error, TEXT("Validation: material '%s' parameter '%s' expected texture '%s' but found '%s'."), *AssetName, *BindingPair.Key, *ExpectedTextureName, *BoundTexture->GetName());
+						}
+					}
+
+					const TSharedPtr<FJsonObject>* ScalarParametersObj = nullptr;
+					if (MaterialObj->TryGetObjectField(TEXT("scalarParameters"), ScalarParametersObj) && ScalarParametersObj && ScalarParametersObj->IsValid())
+					{
+						for (const auto& ScalarPair : (*ScalarParametersObj)->Values)
+						{
+							double ExpectedValue = 0.0;
+							if (!ScalarPair.Value.IsValid() || !ScalarPair.Value->TryGetNumber(ExpectedValue))
+							{
+								V.MaterialBindingErrors++;
+								UE_LOG(LogTemp, Error, TEXT("Validation: material '%s' scalar '%s' is missing a numeric manifest value."), *AssetName, *ScalarPair.Key);
+								continue;
+							}
+
+							float BoundScalar = 0.0f;
+							const bool bResolvedScalar = MaterialInstance->GetScalarParameterValue(FMaterialParameterInfo(*ScalarPair.Key), BoundScalar);
+							if (!bResolvedScalar)
+							{
+								V.MaterialBindingErrors++;
+								UE_LOG(LogTemp, Error, TEXT("Validation: material '%s' scalar '%s' is unresolved. Expected value %.6f."), *AssetName, *ScalarPair.Key, static_cast<float>(ExpectedValue));
+								continue;
+							}
+
+							if (!FMath::IsNearlyEqual(BoundScalar, static_cast<float>(ExpectedValue), 0.0001f))
+							{
+								V.MaterialBindingErrors++;
+								UE_LOG(LogTemp, Error, TEXT("Validation: material '%s' scalar '%s' expected %.6f but found %.6f."), *AssetName, *ScalarPair.Key, static_cast<float>(ExpectedValue), BoundScalar);
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 

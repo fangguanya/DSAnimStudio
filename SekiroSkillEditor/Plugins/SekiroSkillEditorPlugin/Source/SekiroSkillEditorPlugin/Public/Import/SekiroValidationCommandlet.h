@@ -41,6 +41,9 @@ private:
 		int32 TexturesWithZeroSize = 0;
 		// Materials
 		int32 MaterialCount = 0;
+		int32 ExpectedMaterialTextureBindings = 0;
+		int32 ResolvedMaterialTextureBindings = 0;
+		int32 MaterialBindingErrors = 0;
 		// Skills
 		bool bHasSkillConfig = false;
 		bool bHasCanonicalSkillConfig = false;

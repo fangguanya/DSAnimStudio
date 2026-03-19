@@ -107,7 +107,7 @@ namespace DSAnimStudio.Export
                     else
                     {
                         outputFileName = FormalTextureContract.BuildFormalTextureFileName(uniqueName);
-                        decodedPixelFormat = ExportAsPng(tex.Bytes, uniqueName, outputDir);
+                        decodedPixelFormat = ExportAsPng(tex.Bytes, outputFileName, outputDir);
                     }
 
                     recordCallback?.Invoke(new TextureExportRecord
@@ -206,7 +206,7 @@ namespace DSAnimStudio.Export
         /// <summary>
         /// Decode DDS texture using Pfim and export as PNG.
         /// </summary>
-        private string ExportAsPng(byte[] ddsBytes, string name, string outputDir)
+        private string ExportAsPng(byte[] ddsBytes, string outputFileName, string outputDir)
         {
             using (var ms = new MemoryStream(ddsBytes))
             {
@@ -217,7 +217,7 @@ namespace DSAnimStudio.Export
                 }
                 catch (Exception ex)
                 {
-                    string msg = $"Unsupported DDS format for '{name}': {ex.Message}";
+                    string msg = $"Unsupported DDS format for '{outputFileName}': {ex.Message}";
                     _warnings.Add(msg);
                     if (_options.SkipUnsupported)
                             return string.Empty;
@@ -249,14 +249,14 @@ namespace DSAnimStudio.Export
                         pixelFormat = PixelFormat.Format16bppRgb565;
                         break;
                     default:
-                        _warnings.Add($"Unsupported pixel format '{image.Format}' for '{name}'.");
+                        _warnings.Add($"Unsupported pixel format '{image.Format}' for '{outputFileName}'.");
                         if (_options.SkipUnsupported)
                             return image.Format.ToString();
-                        throw new NotSupportedException($"Unsupported pixel format '{image.Format}' for '{name}'.");
+                        throw new NotSupportedException($"Unsupported pixel format '{image.Format}' for '{outputFileName}'.");
                 }
 
                 using var bmp = CreateBitmap(image.Width, image.Height, pixelFormat, pixelData, image.Stride);
-                string outPath = Path.Combine(outputDir, $"{name}.png");
+                string outPath = Path.Combine(outputDir, outputFileName);
                 bmp.Save(outPath, System.Drawing.Imaging.ImageFormat.Png);
                 return image.Format.ToString();
             }

@@ -302,6 +302,7 @@ namespace SekiroExporter
             Console.WriteLine("  --anibnd <path>       Optional override ANIBND for animation export (absolute or relative to game dir)");
             Console.WriteLine("  --skill-anibnd <path> Optional override ANIBND for formal TAE/skill export (absolute or relative to game dir)");
             Console.WriteLine("  --anim <id>           Optional animation clip filter (e.g., a000_200000)");
+            Console.WriteLine("  --anim-list <ids>     Optional comma-separated animation request list (e.g., a000_202010,a000_202011)");
             Console.WriteLine("  --keep-intermediates  Reserved for debug exports; formal export keeps only canonical deliverables by default");
         }
 
@@ -366,7 +367,7 @@ namespace SekiroExporter
                     int num = System.Threading.Interlocked.Increment(ref completed);
                     Console.WriteLine($"━━━ [{num}/{chrFiles.Count}] {chrId} ━━━");
 
-                    reports.Add(ExportCharacter(gameDir, chrPath, chrId, chrOutputDir, args, ExportSections.All));
+                    reports.Add(RunWithIsolatedSekiroDocumentContext(gameDir, () => ExportCharacter(gameDir, chrPath, chrId, chrOutputDir, args, ExportSections.All)));
                     Console.WriteLine();
                 }
                 catch (Exception ex)
@@ -441,14 +442,10 @@ namespace SekiroExporter
                     if (DCX.Is(d)) d = DCX.Decompress(d);
                     skeletonHkx = TryReadHkx(d, file.Name);
                 }
-                else if (sections.HasFlag(ExportSections.Textures)
-                    && (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx")))
-                {
-                    byte[] d = file.Bytes;
-                    if (DCX.Is(d)) d = DCX.Decompress(d);
-                    tpfDataList.Add(d);
-                }
             }
+
+            if (sections.HasFlag(ExportSections.Textures))
+                CollectTpfBytesFromBinder(bnd, tpfDataList);
 
             Console.WriteLine($"  CHRBND: FLVER={flver != null} (nodes={flver?.Nodes?.Count}, meshes={flver?.Meshes?.Count}), Skeleton={skeletonHkx != null}, TPFs={tpfDataList.Count}");
             var formalAssemblyProfile = ResolveFormalAssemblyProfile(gameDir, chrId, args);
@@ -499,16 +496,7 @@ namespace SekiroExporter
                         if (DCX.Is(texbndData)) texbndData = DCX.Decompress(texbndData);
                         var texBnd = BND4.Read(texbndData);
 
-                        foreach (var file in texBnd.Files)
-                        {
-                            string name = file.Name?.ToLower() ?? "";
-                            if (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx"))
-                            {
-                                byte[] d = file.Bytes;
-                                if (DCX.Is(d)) d = DCX.Decompress(d);
-                                tpfDataList.Add(d);
-                            }
-                        }
+                        CollectTpfBytesFromBinder(texBnd, tpfDataList);
 
                         Console.WriteLine($"  TEXBND: {Path.GetFileName(texbndPath)} -> {texBnd.Files.Count} files, {tpfDataList.Count} total TPFs");
                     }
@@ -519,11 +507,32 @@ namespace SekiroExporter
                 }
             }
 
+            if (sections.HasFlag(ExportSections.Textures))
+            {
+                foreach (string globalTexturePath in ResolveFormalGlobalTextureTpfPaths(gameDir))
+                {
+                    try
+                    {
+                        byte[] textureData = File.ReadAllBytes(globalTexturePath);
+                        if (DCX.Is(textureData))
+                            textureData = DCX.Decompress(textureData);
+
+                        if (TPF.Is(textureData))
+                            tpfDataList.Add(textureData);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  GLOBAL TPF error ({Path.GetFileName(globalTexturePath)}): {ex.Message}");
+                    }
+                }
+            }
+
             // ═══════════════════════════════════════════
             // 3. Load ANIBND → TAE events + animations
             // ═══════════════════════════════════════════
             TAE tae = null;
-            string animationFilter = args.GetValueOrDefault("anim");
+            var animationFilters = ParseAnimationFilters(args);
+            string animationFilter = animationFilters.Count == 1 ? animationFilters[0] : null;
             string anibndPath = Path.Combine(chrDir, $"{chrId}.anibnd.dcx");
             string overrideAnibnd = args.GetValueOrDefault("anibnd");
             if (!string.IsNullOrWhiteSpace(overrideAnibnd))
@@ -576,9 +585,9 @@ namespace SekiroExporter
                 Console.WriteLine($"  SKILL SOURCE: {Path.GetFileName(skillAnibndPath)}");
                 report.SkillSourceAnibnd = Path.GetFileName(skillAnibndPath);
 
-                if (string.IsNullOrWhiteSpace(animationFilter))
+                if (animationFilters.Count != 1)
                 {
-                    report.AddSkillError("SKILL_SOURCE_REQUIRES_ANIM_FILTER", "Formal skill export with an independent '--skill-anibnd' requires '--anim <id>' so the TAE payload can be filtered to delivered clips.");
+                    report.AddSkillError("SKILL_SOURCE_REQUIRES_SINGLE_ANIM_FILTER", "Formal skill export with an independent '--skill-anibnd' requires exactly one '--anim <id>' request.");
                 }
                 else if (!File.Exists(skillAnibndPath))
                 {
@@ -615,7 +624,7 @@ namespace SekiroExporter
 
             var formalAnimationResolutions = BuildFormalAnimationResolutions(
                 tae,
-                animationFilter,
+                animationFilters,
                 animationSourceInfo,
                 anibndPath,
                 skillAnibndPath,
@@ -665,9 +674,9 @@ namespace SekiroExporter
                 }
                 catch (Exception ex)
                 {
-                    report.AddModelError("MODEL_EXPORT_FAILED", ex.Message);
-                    assetPackage.GetOrAdd("model").FailureReasons.Add(ex.Message);
-                    Console.Error.WriteLine($"  ✗ Model export error: {ex.Message}");
+                    report.AddModelError("MODEL_EXPORT_FAILED", ex.ToString());
+                    assetPackage.GetOrAdd("model").FailureReasons.Add(ex.ToString());
+                    Console.Error.WriteLine($"  ✗ Model export error: {ex}");
                 }
 
                 // Export material manifest
@@ -687,9 +696,9 @@ namespace SekiroExporter
                 }
                 catch (Exception ex)
                 {
-                    report.AddModelError("MATERIAL_MANIFEST_EXPORT_FAILED", ex.Message);
-                    assetPackage.GetOrAdd("materialManifest").FailureReasons.Add(ex.Message);
-                    Console.Error.WriteLine($"  ✗ Material manifest error: {ex.Message}");
+                    report.AddModelError("MATERIAL_MANIFEST_EXPORT_FAILED", ex.ToString());
+                    assetPackage.GetOrAdd("materialManifest").FailureReasons.Add(ex.ToString());
+                    Console.Error.WriteLine($"  ✗ Material manifest error: {ex}");
                 }
             }
             else if (modelFlvers != null && modelFlvers.Count > 0)
@@ -700,6 +709,9 @@ namespace SekiroExporter
             // ═══════════════════════════════════════════
             // 5. Export textures
             // ═══════════════════════════════════════════
+            if (sections.HasFlag(ExportSections.Textures) && modelFlvers.Count > 0)
+                AugmentTextureSourcesForFormalMaterialBindings(gameDir, modelFlvers, tpfDataList);
+
             if (sections.HasFlag(ExportSections.Textures) && tpfDataList.Count > 0)
             {
                 Directory.CreateDirectory(texDir);
@@ -775,7 +787,7 @@ namespace SekiroExporter
 
                 try
                 {
-                    string animationExportFilter = ResolveAnimationExportFilter(animationFilter, formalAnimationResolutions);
+                    string animationExportFilter = ResolveAnimationExportFilter(animationFilters, formalAnimationResolutions);
                     var animationRawBytesByPath = animationRawSources
                         .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
                         .ToDictionary(group => group.Key, group => group.First().RawBytes, StringComparer.OrdinalIgnoreCase);
@@ -1096,6 +1108,28 @@ namespace SekiroExporter
             return result;
         }
 
+        static IReadOnlyList<string> ResolveFormalGlobalTextureTpfPaths(string gameDir)
+        {
+            if (string.IsNullOrWhiteSpace(gameDir))
+                return Array.Empty<string>();
+
+            var result = new List<string>();
+
+            void addIfExists(string relativePath)
+            {
+                string path = Path.Combine(gameDir, relativePath.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(path) && !result.Contains(path, StringComparer.OrdinalIgnoreCase))
+                    result.Add(path);
+            }
+
+            addIfExists("other/systex.tpf.dcx");
+            addIfExists("other/maptex.tpf.dcx");
+            addIfExists("other/decaltex.tpf.dcx");
+            addIfExists("parts/common_body.tpf.dcx");
+
+            return result;
+        }
+
         static int RunExportModel(Dictionary<string, string> args)
         {
             string gameDir = GetRequired(args, "game-dir");
@@ -1103,7 +1137,7 @@ namespace SekiroExporter
             string chrId = GetRequired(args, "chr");
 
             string chrBndPath = FindChrBnd(gameDir, chrId);
-            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Model);
+            RunWithIsolatedSekiroDocumentContext(gameDir, () => ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Model));
             return 0;
         }
 
@@ -1114,7 +1148,7 @@ namespace SekiroExporter
             string chrId = GetRequired(args, "chr");
 
             string chrBndPath = FindChrBnd(gameDir, chrId);
-            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Animations);
+            RunWithIsolatedSekiroDocumentContext(gameDir, () => ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Animations));
             return 0;
         }
 
@@ -1125,7 +1159,7 @@ namespace SekiroExporter
             string chrId = GetRequired(args, "chr");
 
             string chrBndPath = FindChrBnd(gameDir, chrId);
-            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Textures);
+            RunWithIsolatedSekiroDocumentContext(gameDir, () => ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Textures));
             return 0;
         }
 
@@ -1136,7 +1170,7 @@ namespace SekiroExporter
             string chrId = GetRequired(args, "chr");
 
             string chrBndPath = FindChrBnd(gameDir, chrId);
-            ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Skills);
+            RunWithIsolatedSekiroDocumentContext(gameDir, () => ExportCharacter(gameDir, chrBndPath, chrId, output, args, ExportSections.Skills));
             return 0;
         }
 
@@ -1211,21 +1245,169 @@ namespace SekiroExporter
 
             byte[] binderData = File.ReadAllBytes(binderPath);
             if (DCX.Is(binderData)) binderData = DCX.Decompress(binderData);
-            var bnd = BND4.Read(binderData);
             var result = new List<byte[]>();
 
-            foreach (var file in bnd.Files)
+            IBinder bnd = null;
+            if (BND4.Is(binderData))
+                bnd = BND4.Read(binderData);
+            else if (BND3.Is(binderData))
+                bnd = BND3.Read(binderData);
+
+            if (bnd != null)
+                CollectTpfBytesFromBinder(bnd, result);
+
+            return result;
+        }
+
+        static void CollectTpfBytesFromBinder(IBinder binder, List<byte[]> result)
+        {
+            if (binder == null || result == null)
+                return;
+
+            foreach (var file in binder.Files)
             {
                 string name = file.Name?.ToLowerInvariant() ?? string.Empty;
-                if (!name.EndsWith(".tpf") && !name.EndsWith(".tpf.dcx"))
+                byte[] payload = file.Bytes;
+                if (payload == null || payload.Length == 0)
                     continue;
 
-                byte[] tpfData = file.Bytes;
-                if (DCX.Is(tpfData)) tpfData = DCX.Decompress(tpfData);
-                result.Add(tpfData);
+                if (DCX.Is(payload))
+                    payload = DCX.Decompress(payload);
+
+                if (name.EndsWith(".tpf") || name.EndsWith(".tpf.dcx") || TPF.Is(payload))
+                {
+                    result.Add(payload);
+                }
+                else if (name.EndsWith(".tbnd") || name.EndsWith(".tbnd.dcx") || BND3.Is(payload) || BND4.Is(payload))
+                {
+                    IBinder tbnd = null;
+                    if (BND3.Is(payload))
+                        tbnd = BND3.Read(payload);
+                    else if (BND4.Is(payload))
+                        tbnd = BND4.Read(payload);
+
+                    CollectTpfBytesFromBinder(tbnd, result);
+                }
+            }
+        }
+
+        static void AugmentTextureSourcesForFormalMaterialBindings(string gameDir, IReadOnlyList<FLVER2> modelFlvers, List<byte[]> tpfDataList)
+        {
+            if (string.IsNullOrWhiteSpace(gameDir) || modelFlvers == null || modelFlvers.Count == 0 || tpfDataList == null)
+                return;
+
+            var requiredTextureStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var flver in modelFlvers)
+            {
+                if (flver?.Materials == null)
+                    continue;
+
+                foreach (var material in flver.Materials)
+                {
+                    foreach (var binding in FormalMaterialTextureResolver.Resolve(material))
+                    {
+                        if (!string.IsNullOrWhiteSpace(binding?.TextureStem))
+                            requiredTextureStems.Add(binding.TextureStem);
+                    }
+                }
+            }
+
+            if (requiredTextureStems.Count == 0)
+                return;
+
+            var availableTextureStems = CollectTextureStemsFromTpfs(tpfDataList);
+            requiredTextureStems.ExceptWith(availableTextureStems);
+            if (requiredTextureStems.Count == 0)
+                return;
+
+            string partsDir = Path.Combine(gameDir, "parts");
+            if (!Directory.Exists(partsDir))
+                return;
+
+            var familyPrefixes = new HashSet<string>(
+                requiredTextureStems
+                    .Select(GetTextureFamilyPrefix)
+                    .Where(prefix => !string.IsNullOrWhiteSpace(prefix)),
+                StringComparer.OrdinalIgnoreCase);
+
+            var candidateBinderPaths = new List<string>();
+            foreach (string familyPrefix in familyPrefixes)
+                candidateBinderPaths.AddRange(Directory.EnumerateFiles(partsDir, $"{familyPrefix}_*.partsbnd.dcx", SearchOption.TopDirectoryOnly));
+
+            string chrDir = Path.Combine(gameDir, "chr");
+            if (requiredTextureStems.Count > 0)
+            {
+                candidateBinderPaths.AddRange(Directory.EnumerateFiles(partsDir, "*.partsbnd.dcx", SearchOption.TopDirectoryOnly));
+                if (Directory.Exists(chrDir))
+                {
+                    candidateBinderPaths.AddRange(Directory.EnumerateFiles(chrDir, "*.chrbnd.dcx", SearchOption.TopDirectoryOnly));
+                    candidateBinderPaths.AddRange(Directory.EnumerateFiles(chrDir, "*.texbnd.dcx", SearchOption.TopDirectoryOnly));
+                }
+            }
+
+            foreach (string binderPath in candidateBinderPaths.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (requiredTextureStems.Count == 0)
+                    break;
+
+                foreach (byte[] tpfData in ReadTpfBytesFromBinder(binderPath))
+                {
+                    var tpfTextureStems = CollectTextureStemsFromTpf(tpfData);
+                    if (tpfTextureStems.Count == 0 || !tpfTextureStems.Overlaps(requiredTextureStems))
+                        continue;
+
+                    tpfDataList.Add(tpfData);
+                    requiredTextureStems.ExceptWith(tpfTextureStems);
+                }
+            }
+
+            if (requiredTextureStems.Count > 0)
+                Console.WriteLine($"  TEXTURE AUGMENT: unresolved formal texture stems remain: {requiredTextureStems.Count}");
+            else
+                Console.WriteLine("  TEXTURE AUGMENT: resolved all formal material texture stems");
+        }
+
+        static HashSet<string> CollectTextureStemsFromTpfs(IEnumerable<byte[]> tpfDataList)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (byte[] tpfData in tpfDataList ?? Enumerable.Empty<byte[]>())
+                result.UnionWith(CollectTextureStemsFromTpf(tpfData));
+            return result;
+        }
+
+        static HashSet<string> CollectTextureStemsFromTpf(byte[] tpfData)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (tpfData == null || tpfData.Length == 0)
+                return result;
+
+            try
+            {
+                var tpf = TPF.Read(tpfData);
+                foreach (var texture in tpf.Textures)
+                {
+                    string stem = Utils.GetShortIngameFileName(texture?.Name);
+                    if (!string.IsNullOrWhiteSpace(stem))
+                        result.Add(stem.ToLowerInvariant());
+                }
+            }
+            catch
+            {
             }
 
             return result;
+        }
+
+        static string GetTextureFamilyPrefix(string textureStem)
+        {
+            if (string.IsNullOrWhiteSpace(textureStem))
+                return null;
+
+            string[] segments = textureStem.Split(new[] { '_' }, StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length < 2)
+                return null;
+
+            return string.Join("_", segments.Take(2)).ToUpperInvariant();
         }
 
         static string ResolveGamePath(string gameDir, string path)
@@ -1562,11 +1744,33 @@ namespace SekiroExporter
 
             foreach (string referencedAnibndPath in ResolveReferencedAdditionalAnibndPaths(gameDir, chrDir, baseAnibndPath))
             {
+                if (!IsOriginalFormalAnimationAnibnd(chrId, referencedAnibndPath))
+                    continue;
+
                 if (!resolvedPaths.Contains(referencedAnibndPath, StringComparer.OrdinalIgnoreCase))
                     resolvedPaths.Add(referencedAnibndPath);
             }
 
             return resolvedPaths;
+        }
+
+        static bool IsOriginalFormalAnimationAnibnd(string chrId, string anibndPath)
+        {
+            if (string.IsNullOrWhiteSpace(chrId) || string.IsNullOrWhiteSpace(anibndPath))
+                return false;
+
+            string fileName = Path.GetFileName(anibndPath) ?? string.Empty;
+            string stem = Path.GetFileNameWithoutExtension(fileName);
+            if (stem.EndsWith(".anibnd", StringComparison.OrdinalIgnoreCase))
+                stem = Path.GetFileNameWithoutExtension(stem);
+
+            if (string.Equals(stem, chrId, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(stem, $"{chrId}_0000", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return stem.StartsWith($"{chrId}_a", StringComparison.OrdinalIgnoreCase);
         }
 
         static List<string> ResolveReferencedAdditionalAnibndPaths(string gameDir, string chrDir, string baseAnibndPath)
@@ -1791,19 +1995,28 @@ namespace SekiroExporter
 
         static List<FormalAnimationResolution> BuildFormalAnimationResolutions(
             TAE tae,
-            string animationFilter,
+            IReadOnlyCollection<string> animationFilters,
             AnibndSourceInfo animationSource,
             string animationSourcePath,
             string skillSourcePath,
             ExportCharacterReport report)
         {
             var results = new List<FormalAnimationResolution>();
+            var requestedAnimationNames = new HashSet<string>(ParseAnimationFilters(animationFilters), StringComparer.OrdinalIgnoreCase);
+            var requestedAnimationIds = new HashSet<long>(requestedAnimationNames.Select(ParseAnimationKeyToId).Where(id => id >= 0));
 
             if (tae?.Animations != null && tae.Animations.Count > 0)
             {
                 var animationIndex = BuildFormalAnimationIndex(tae.Animations, "formal animation resolution");
                 foreach (var animation in tae.Animations)
                 {
+                    if (requestedAnimationNames.Count > 0)
+                    {
+                        string requestName = FormatAnimationKey(animation.ID);
+                        if (!requestedAnimationNames.Contains(requestName) && !requestedAnimationIds.Contains(animation.ID))
+                            continue;
+                    }
+
                     try
                     {
                         results.Add(ResolveFormalAnimation(animation, animationIndex, animationSource, animationSourcePath, skillSourcePath));
@@ -1814,31 +2027,62 @@ namespace SekiroExporter
                     }
                 }
 
-                return results;
+                return FilterFormalAnimationResolutionsToOriginalContent(results);
             }
 
-            if (!string.IsNullOrWhiteSpace(animationFilter))
+            if (requestedAnimationNames.Count > 0)
             {
-                string normalizedFilter = NormalizeAnimationReference(animationFilter);
-                long parsedId = ParseAnimationKeyToId(normalizedFilter);
-                results.Add(new FormalAnimationResolution
+                foreach (string normalizedFilter in requestedAnimationNames)
                 {
-                    RequestTaeId = parsedId,
-                    RequestTaeName = normalizedFilter,
-                    ResolvedTaeId = parsedId,
-                    ResolvedTaeName = normalizedFilter,
-                    ResolvedHkxId = parsedId,
-                    ResolvedHkxName = normalizedFilter,
-                    SourceAnimFileName = normalizedFilter,
-                    SourceAnimStem = normalizedFilter,
-                    DeliverableAnimFileName = $"{normalizedFilter}.gltf",
-                    AnimationSourcePath = animationSource?.SourcePath ?? animationSourcePath,
-                    AnimationSourceAnibnd = Path.GetFileName(animationSource?.SourcePath ?? animationSourcePath),
-                    SkillSourceAnibnd = Path.GetFileName(skillSourcePath),
-                });
+                    long parsedId = ParseAnimationKeyToId(normalizedFilter);
+                    results.Add(new FormalAnimationResolution
+                    {
+                        RequestTaeId = parsedId,
+                        RequestTaeName = normalizedFilter,
+                        ResolvedTaeId = parsedId,
+                        ResolvedTaeName = normalizedFilter,
+                        ResolvedHkxId = parsedId,
+                        ResolvedHkxName = normalizedFilter,
+                        SourceAnimFileName = normalizedFilter,
+                        SourceAnimStem = normalizedFilter,
+                        DeliverableAnimFileName = $"{normalizedFilter}.gltf",
+                        AnimationSourcePath = animationSource?.SourcePath ?? animationSourcePath,
+                        AnimationSourceAnibnd = Path.GetFileName(animationSource?.SourcePath ?? animationSourcePath),
+                        SkillSourceAnibnd = Path.GetFileName(skillSourcePath),
+                    });
+                }
             }
 
-            return results;
+            return FilterFormalAnimationResolutionsToOriginalContent(results);
+        }
+
+        static List<FormalAnimationResolution> FilterFormalAnimationResolutionsToOriginalContent(
+            IEnumerable<FormalAnimationResolution> resolutions)
+        {
+            return (resolutions ?? Enumerable.Empty<FormalAnimationResolution>())
+                .Where(resolution => resolution != null
+                    && !string.IsNullOrWhiteSpace(resolution.SourceAnimStem)
+                    && !string.IsNullOrWhiteSpace(resolution.AnimationSourcePath))
+                .GroupBy(
+                    resolution => $"{resolution.AnimationSourcePath}\n{resolution.SourceAnimStem}",
+                    StringComparer.OrdinalIgnoreCase)
+                .Select(group => group
+                    .OrderByDescending(IsOriginalFormalAnimationResolution)
+                    .ThenBy(resolution => resolution.RequestTaeId != resolution.ResolvedHkxId)
+                    .ThenBy(resolution => resolution.RequestTaeId)
+                    .First())
+                .OrderBy(resolution => resolution.AnimationSourcePath, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(resolution => resolution.SourceAnimStem, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        static bool IsOriginalFormalAnimationResolution(FormalAnimationResolution resolution)
+        {
+            if (resolution == null)
+                return false;
+
+            return resolution.RequestTaeId == resolution.ResolvedTaeId
+                && resolution.RequestTaeId == resolution.ResolvedHkxId;
         }
 
         static IReadOnlyDictionary<long, TAE.Animation> BuildFormalAnimationIndex(
@@ -2016,15 +2260,50 @@ namespace SekiroExporter
                 || (!string.IsNullOrWhiteSpace(sourceStem) && string.Equals(resolution.SourceAnimStem, sourceStem, StringComparison.OrdinalIgnoreCase)));
         }
 
-        static string ResolveAnimationExportFilter(string animationFilter, IReadOnlyList<FormalAnimationResolution> resolutions)
+        static string ResolveAnimationExportFilter(IReadOnlyCollection<string> animationFilters, IReadOnlyList<FormalAnimationResolution> resolutions)
         {
-            if (string.IsNullOrWhiteSpace(animationFilter))
+            var normalizedFilters = ParseAnimationFilters(animationFilters);
+            if (normalizedFilters.Count == 0)
                 return null;
 
             if (resolutions != null && resolutions.Count == 1)
                 return resolutions[0].SourceAnimStem;
 
-            return NormalizeAnimationReference(animationFilter);
+            return normalizedFilters.Count == 1 ? normalizedFilters[0] : null;
+        }
+
+        static List<string> ParseAnimationFilters(Dictionary<string, string> args)
+        {
+            var values = new List<string>();
+            if (args == null)
+                return values;
+
+            if (args.TryGetValue("anim", out string single) && !string.IsNullOrWhiteSpace(single))
+                values.Add(single);
+            if (args.TryGetValue("anim-list", out string multi) && !string.IsNullOrWhiteSpace(multi))
+                values.Add(multi);
+
+            return ParseAnimationFilters(values);
+        }
+
+        static List<string> ParseAnimationFilters(IEnumerable<string> values)
+        {
+            var result = new List<string>();
+            foreach (string value in values ?? Enumerable.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    continue;
+
+                var split = value
+                    .Split(new[] { ',', ';', '\r', '\n', '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(NormalizeAnimationReference)
+                    .Where(entry => !string.IsNullOrWhiteSpace(entry));
+                result.AddRange(split);
+            }
+
+            return result
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         static long ParseAnimationKeyToId(string animationKey)
@@ -2217,7 +2496,7 @@ namespace SekiroExporter
             var paramBinder = BND4.Read(paramBinderBytes);
             var result = new FormalSekiroSkillParams();
 
-            RunWithIsolatedSekiroDocumentContext(() =>
+            RunWithIsolatedSekiroDocumentContext(normalizedGameDir, () =>
             {
                 ReadTypedParamRows(paramBinder, "BehaviorParam", result.BehaviorNpc);
                 ReadTypedParamRows(paramBinder, "BehaviorParam_PC", result.BehaviorPc);
@@ -2494,7 +2773,7 @@ namespace SekiroExporter
             return (string)nodes[skeletonIndex]?["name"] ?? string.Empty;
         }
 
-        static T RunWithIsolatedSekiroDocumentContext<T>(Func<T> callback)
+        static T RunWithIsolatedSekiroDocumentContext<T>(string interrootPath, Func<T> callback)
         {
             if (callback == null)
                 throw new ArgumentNullException(nameof(callback));
@@ -2515,6 +2794,8 @@ namespace SekiroExporter
             isolatedDocument.GameRoot = new zzz_GameRootIns(isolatedDocument)
             {
                 GameType = SoulsGames.SDT,
+                InterrootPath = interrootPath,
+                DefaultGameDir = interrootPath,
             };
 
             documents?.Add(isolatedDocument);
@@ -2522,6 +2803,7 @@ namespace SekiroExporter
 
             try
             {
+                isolatedDocument.GameRoot.LoadMTDBND();
                 return callback();
             }
             finally

@@ -19,11 +19,12 @@ namespace DSAnimStudio.Export
 
         private sealed class ManifestMaterialEntry
         {
-            public int Index { get; init; }
-            public string Name { get; init; }
-            public string Mtd { get; init; }
-            public JArray Textures { get; init; }
-            public JObject TextureBindings { get; init; }
+            public int Index { get; set; }
+            public string Name { get; set; }
+            public string Mtd { get; set; }
+            public JArray Textures { get; set; }
+            public JObject TextureBindings { get; set; }
+            public JObject ScalarParameters { get; set; }
             public JArray MeshIndices { get; } = new JArray();
         }
 
@@ -78,7 +79,7 @@ namespace DSAnimStudio.Export
                 for (int matIdx = 0; matIdx < flver.Materials.Count; matIdx++)
                 {
                     var mat = flver.Materials[matIdx];
-                    string key = $"{mat.Name ?? string.Empty}\u001F{mat.MTD ?? string.Empty}";
+                    string key = BuildManifestSlotKey(mat.Name);
 
                     if (!manifestEntries.TryGetValue(key, out var manifestEntry))
                     {
@@ -89,8 +90,17 @@ namespace DSAnimStudio.Export
                             Mtd = mat.MTD ?? string.Empty,
                             Textures = BuildTextureArray(mat, textureFileExtension),
                             TextureBindings = BuildTextureBindings(mat, textureFileExtension),
+                            ScalarParameters = BuildScalarParameters(mat, textureFileExtension),
                         };
                         manifestEntries.Add(key, manifestEntry);
+                    }
+                    else
+                    {
+                        manifestEntry.Name = mat.Name ?? string.Empty;
+                        manifestEntry.Mtd = mat.MTD ?? string.Empty;
+                        manifestEntry.Textures = BuildTextureArray(mat, textureFileExtension);
+                        manifestEntry.TextureBindings = BuildTextureBindings(mat, textureFileExtension);
+                        manifestEntry.ScalarParameters = BuildScalarParameters(mat, textureFileExtension);
                     }
 
                     for (int meshIdx = 0; meshIdx < flver.Meshes.Count; meshIdx++)
@@ -113,6 +123,7 @@ namespace DSAnimStudio.Export
                 matObj["slotName"] = manifestEntry.Name;
                 matObj["textures"] = manifestEntry.Textures;
                 matObj["textureBindings"] = manifestEntry.TextureBindings;
+                matObj["scalarParameters"] = manifestEntry.ScalarParameters;
                 matObj["meshIndices"] = manifestEntry.MeshIndices;
                 materialsArray.Add(matObj);
             }
@@ -127,38 +138,24 @@ namespace DSAnimStudio.Export
         {
             var texturesArray = new JArray();
 
-            int indexAlbedo = 0;
-            int indexSpecular = 0;
-            int indexNormal = 0;
-            int indexEmissive = 0;
-            int indexShininess = 0;
-
-            foreach (var tex in mat.Textures)
+            foreach (var binding in FormalMaterialTextureResolver.Resolve(mat, textureFileExtension))
             {
-                if (string.IsNullOrEmpty(tex.Path))
-                    continue;
-
                 var texObj = new JObject();
-                string texFileName = FlverToFbxExporter.GetTextureFileName(tex.Path);
-                texObj["type"] = tex.Type ?? "";
-                texObj["gamePath"] = tex.Path;
-
-                string exportedFileName = texFileName + textureFileExtension;
-                texObj["exportedFile"] = exportedFileName;
-                texObj["exportedFileName"] = exportedFileName;
-                texObj["relativePath"] = FormalTextureContract.BuildRelativeTexturePath(exportedFileName);
-
-                var slotType = ClassifyTextureType(tex.Type,
-                    ref indexAlbedo, ref indexSpecular, ref indexNormal,
-                    ref indexEmissive, ref indexShininess);
-                texObj["slotType"] = slotType.ToString();
-                texObj["parameterName"] = GetParameterName(slotType);
-                texObj["colorSpace"] = FormalTextureContract.GetColorSpace(slotType.ToString());
+                texObj["type"] = binding.TextureType ?? string.Empty;
+                texObj["gamePath"] = binding.GamePath ?? string.Empty;
+                texObj["effectiveGamePath"] = binding.EffectiveGamePath ?? string.Empty;
+                texObj["exportedFile"] = binding.ExportedFileName ?? string.Empty;
+                texObj["exportedFileName"] = binding.ExportedFileName ?? string.Empty;
+                texObj["relativePath"] = binding.RelativePath ?? string.Empty;
+                texObj["slotType"] = binding.SlotType ?? string.Empty;
+                texObj["slotIndex"] = binding.SlotIndex;
+                texObj["parameterName"] = binding.ParameterName ?? string.Empty;
+                texObj["colorSpace"] = binding.ColorSpace ?? string.Empty;
 
                 texObj["scale"] = new JObject
                 {
-                    ["x"] = tex.Scale.X,
-                    ["y"] = tex.Scale.Y
+                    ["x"] = binding.Scale.X,
+                    ["y"] = binding.Scale.Y
                 };
 
                 texturesArray.Add(texObj);
@@ -198,6 +195,30 @@ namespace DSAnimStudio.Export
             return bindings;
         }
 
+        private static JObject BuildScalarParameters(FLVER2.Material mat, string textureFileExtension)
+        {
+            var scalars = new JObject();
+
+            foreach (JObject textureEntry in BuildTextureArray(mat, textureFileExtension).OfType<JObject>())
+            {
+                string parameterName = (string)textureEntry["parameterName"];
+                if (string.IsNullOrWhiteSpace(parameterName))
+                    continue;
+
+                JObject scaleObject = textureEntry["scale"] as JObject;
+                if (scaleObject == null)
+                    continue;
+
+                float scaleX = scaleObject.Value<float?>("x") ?? 1.0f;
+                float scaleY = scaleObject.Value<float?>("y") ?? 1.0f;
+
+                scalars[$"{parameterName}_UScale"] = scaleX;
+                scalars[$"{parameterName}_VScale"] = scaleY;
+            }
+
+            return scalars;
+        }
+
         private static string BuildMaterialInstanceKey(string materialName, int index)
         {
             string sanitized = (materialName ?? string.Empty)
@@ -210,6 +231,11 @@ namespace DSAnimStudio.Export
                 sanitized = $"Material_{index:D3}";
 
             return $"MI_{sanitized}";
+        }
+
+        private static string BuildManifestSlotKey(string materialName)
+        {
+            return (materialName ?? string.Empty).Trim();
         }
 
         public static string GetParameterName(TextureSlotType slotType)

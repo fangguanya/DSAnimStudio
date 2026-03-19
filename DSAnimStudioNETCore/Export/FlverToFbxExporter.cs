@@ -547,35 +547,36 @@ namespace DSAnimStudio.Export
                 Name = !string.IsNullOrEmpty(flverMat.Name) ? flverMat.Name : $"Material_{materialIndex}"
             };
 
-            foreach (var tex in flverMat.Textures)
+            foreach (var binding in FormalMaterialTextureResolver.Resolve(flverMat))
             {
-                if (string.IsNullOrEmpty(tex.Path))
+                if (string.IsNullOrWhiteSpace(binding.ModelRelativePath))
                     continue;
 
-                string texFileName = GetTextureFileName(tex.Path);
-                var typeUpper = tex.Type?.ToUpper() ?? string.Empty;
-
-                if (typeUpper.Contains("DIFFUSE") || typeUpper.Contains("ALBEDO"))
+                if (string.Equals(binding.SlotType, "BaseColor", StringComparison.OrdinalIgnoreCase)
+                    && binding.SlotIndex == 1)
                 {
-                    mat.TextureDiffuse = new TextureSlot(texFileName,
+                    mat.TextureDiffuse = new TextureSlot(binding.ModelRelativePath,
                         TextureType.Diffuse, 0, TextureMapping.FromUV,
                         0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
                 }
-                else if (typeUpper.Contains("BUMPMAP") || typeUpper.Contains("NORMALMAP"))
+                else if (string.Equals(binding.SlotType, "Normal", StringComparison.OrdinalIgnoreCase)
+                    && binding.SlotIndex == 1)
                 {
-                    mat.TextureNormal = new TextureSlot(texFileName,
+                    mat.TextureNormal = new TextureSlot(binding.ModelRelativePath,
                         TextureType.Normals, 0, TextureMapping.FromUV,
                         0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
                 }
-                else if (typeUpper.Contains("SPECULAR") || typeUpper.Contains("REFLECTANCE"))
+                else if (string.Equals(binding.SlotType, "Specular", StringComparison.OrdinalIgnoreCase)
+                    && binding.SlotIndex == 1)
                 {
-                    mat.TextureSpecular = new TextureSlot(texFileName,
+                    mat.TextureSpecular = new TextureSlot(binding.ModelRelativePath,
                         TextureType.Specular, 0, TextureMapping.FromUV,
                         0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
                 }
-                else if (typeUpper.Contains("EMISSIVE"))
+                else if (string.Equals(binding.SlotType, "Emissive", StringComparison.OrdinalIgnoreCase)
+                    && binding.SlotIndex == 1)
                 {
-                    mat.TextureEmissive = new TextureSlot(texFileName,
+                    mat.TextureEmissive = new TextureSlot(binding.ModelRelativePath,
                         TextureType.Emissive, 0, TextureMapping.FromUV,
                         0, 1.0f, TextureOperation.Multiply, TextureWrapMode.Wrap, TextureWrapMode.Wrap, 0);
                 }

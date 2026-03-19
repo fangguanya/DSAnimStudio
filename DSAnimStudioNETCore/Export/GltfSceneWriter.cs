@@ -150,7 +150,7 @@ namespace DSAnimStudio.Export
 
                 if (!imageIndices.TryGetValue(normalizedPath, out int imageIndex))
                 {
-                    images.Add(new JObject { ["uri"] = Path.GetFileName(normalizedPath) });
+                    images.Add(new JObject { ["uri"] = normalizedPath });
                     imageIndex = images.Count - 1;
                     imageIndices.Add(normalizedPath, imageIndex);
                 }

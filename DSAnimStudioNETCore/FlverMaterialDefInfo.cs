@@ -3,6 +3,7 @@ using SoulsAssetPipeline;
 using SoulsFormats;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -176,13 +177,23 @@ namespace DSAnimStudio
                 }
                 else
                 {
-                    var data = zzz_DocumentManager.CurrentDocument.GameData.ReadFile(path);
+                    byte[] data = null;
+                    var currentDocument = zzz_DocumentManager.CurrentDocument;
+
+                    if (currentDocument?.GameData != null)
+                        data = currentDocument.GameData.ReadFile(path, warningOnFail: false);
+
+                    if (data == null && currentDocument?.GameRoot?.InterrootPath != null)
+                    {
+                        string relativePath = path.TrimStart('/').Replace('/', '\\');
+                        string absolutePath = Path.Combine(currentDocument.GameRoot.InterrootPath, relativePath);
+                        if (File.Exists(absolutePath))
+                            data = File.ReadAllBytes(absolutePath);
+                    }
+
                     if (data != null)
                     {
-                        if (BND3.Is(data))
-                            result = BND3.Read(data);
-                        else if (BND4.Is(data))
-                            result = BND4.Read(data);
+                        result = Utils.ReadBinder(data);
 
                         _binderCache.Add(path, result);
                     }

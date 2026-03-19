@@ -8,6 +8,16 @@
 	"CreatedBy": "SekiroModTools",
 	"CanContainContent": true,
 	"IsBetaVersion": true,
+	"Plugins": [
+		{
+			"Name": "EditorScriptingUtilities",
+			"Enabled": true
+		},
+		{
+			"Name": "Interchange",
+			"Enabled": true
+		}
+	],
 	"Modules": [
 		{
 			"Name": "SekiroSkillEditorPlugin",

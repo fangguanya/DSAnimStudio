@@ -261,6 +261,15 @@ namespace
 		return LoadObject<USekiroCharacterData>(nullptr, *ObjectPath);
 	}
 
+	static FString NormalizeMaterialSlotName(const FString& SlotName)
+	{
+		FString Normalized = SlotName;
+		Normalized.ReplaceInline(TEXT(" "), TEXT("_"));
+		Normalized.ReplaceInline(TEXT("|"), TEXT("_"));
+		Normalized.ReplaceInline(TEXT("#"), TEXT("_"));
+		return Normalized;
+	}
+
 	static void PopulateCharacterMaterialMapFromManifest(USekiroCharacterData* CharacterAsset, const FString& ChrContent, const FString& ManifestPath)
 	{
 		if (!CharacterAsset)
@@ -309,10 +318,58 @@ namespace
 			if (UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialObjectPath))
 			{
 				CharacterAsset->MaterialMap.Add(SlotName, TSoftObjectPtr<UMaterialInterface>(Material));
+				CharacterAsset->MaterialMap.Add(NormalizeMaterialSlotName(SlotName), TSoftObjectPtr<UMaterialInterface>(Material));
 			}
 		}
 
 		CharacterAsset->MarkPackageDirty();
+	}
+
+	static TArray<FString> ParseCsvPatterns(const FString& Value)
+	{
+		TArray<FString> Result;
+		if (Value.IsEmpty())
+		{
+			return Result;
+		}
+
+		Value.ParseIntoArray(Result, TEXT(","), true);
+		for (FString& Entry : Result)
+		{
+			Entry = Entry.TrimStartAndEnd();
+		}
+
+		Result.RemoveAll([](const FString& Entry)
+		{
+			return Entry.IsEmpty();
+		});
+		return Result;
+	}
+
+	static bool MatchesAnimationFilter(const FString& AnimationName, const TArray<FString>& AnimFilters)
+	{
+		if (AnimFilters.Num() == 0)
+		{
+			return true;
+		}
+
+		for (const FString& Filter : AnimFilters)
+		{
+			if (Filter.Contains(TEXT("*")) || Filter.Contains(TEXT("?")))
+			{
+				if (AnimationName.MatchesWildcard(Filter, ESearchCase::IgnoreCase))
+				{
+					return true;
+				}
+			}
+			else if (AnimationName.Equals(Filter, ESearchCase::IgnoreCase)
+				|| AnimationName.StartsWith(Filter, ESearchCase::IgnoreCase))
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 }
 
@@ -328,8 +385,11 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 {
 	FString ExportDir;
 	FString ChrFilterStr;
+	FString AnimFilterStr;
 	FString ContentBase = TEXT("/Game/SekiroAssets/Characters");
 	int32 AnimLimit = -1;
+	bool bImportAnimationsOnly = false;
+	bool bImportModelOnly = false;
 
 	TArray<FString> Tokens;
 	TArray<FString> Switches;
@@ -347,8 +407,20 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	if (ParamsMap.Contains(TEXT("ContentBase")))
 		ContentBase = ParamsMap[TEXT("ContentBase")];
 
+	if (ParamsMap.Contains(TEXT("AnimFilter")))
+		AnimFilterStr = ParamsMap[TEXT("AnimFilter")];
+
 	if (ParamsMap.Contains(TEXT("AnimLimit")))
 		AnimLimit = FCString::Atoi(*ParamsMap[TEXT("AnimLimit")]);
+
+	FString ImportAnimationsOnlyValue;
+	bImportAnimationsOnly = FParse::Param(*Params, TEXT("ImportAnimationsOnly"))
+		|| FParse::Param(*Params, TEXT("AnimationsOnly"))
+		|| (FParse::Value(*Params, TEXT("ImportAnimationsOnly="), ImportAnimationsOnlyValue)
+			&& ImportAnimationsOnlyValue.Equals(TEXT("true"), ESearchCase::IgnoreCase))
+		|| (ParamsMap.Contains(TEXT("ImportAnimationsOnly")) && ParamsMap[TEXT("ImportAnimationsOnly")].Equals(TEXT("true"), ESearchCase::IgnoreCase));
+	bImportModelOnly = FParse::Param(*Params, TEXT("ImportModelOnly"))
+		|| (ParamsMap.Contains(TEXT("ImportModelOnly")) && ParamsMap[TEXT("ImportModelOnly")].Equals(TEXT("true"), ESearchCase::IgnoreCase));
 
 	UE_LOG(LogTemp, Display, TEXT("=== Sekiro Import Commandlet ==="));
 	UE_LOG(LogTemp, Display, TEXT("ExportDir: %s"), *ExportDir);
@@ -359,6 +431,7 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	TArray<FString> ChrFilter;
 	if (!ChrFilterStr.IsEmpty())
 		ChrFilterStr.ParseIntoArray(ChrFilter, TEXT(","));
+	const TArray<FString> AnimFilters = ParseCsvPatterns(AnimFilterStr);
 
 	TArray<FString> ValidChrs;
 	for (const FString& Dir : ChrDirs)
@@ -377,7 +450,7 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	{
 		const FString& ChrId = ValidChrs[i];
 		UE_LOG(LogTemp, Display, TEXT("[%d/%d] Importing %s..."), i + 1, ValidChrs.Num(), *ChrId);
-		ImportCharacter(ChrId, ExportDir / ChrId, ContentBase, AnimLimit);
+		ImportCharacter(ChrId, ExportDir / ChrId, ContentBase, AnimLimit, AnimFilters, bImportAnimationsOnly, bImportModelOnly);
 
 		if ((i + 1) % 5 == 0)
 			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
@@ -388,11 +461,10 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	return 0;
 }
 
-void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FString& ExportDir, const FString& ContentBase, int32 AnimLimit)
+void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FString& ExportDir, const FString& ContentBase, int32 AnimLimit, const TArray<FString>& AnimFilters, bool bImportAnimationsOnly, bool bImportModelOnly)
 {
 	FString ChrContent = ContentBase / ChrId;
 	int32 TexCount = 0, AnimCount = 0;
-	const int32 ExpectedAnimationCount = AnimationFiles.Num();
 	TArray<FString> Errors;
 
 	TSharedPtr<FJsonObject> AssetPackage;
@@ -403,22 +475,63 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		return;
 	}
 
-	if (AssetPackage->GetStringField(TEXT("deliveryMode")) != TEXT("formal-only") || !AssetPackage->GetBoolField(TEXT("formalSuccess")))
-	{
-		UE_LOG(LogTemp, Error, TEXT("  Asset package is not a successful formal-only export: %s"), *AssetPackagePath);
-		return;
-	}
-
 	TArray<FString> TextureFiles;
 	TArray<FString> ModelFiles;
 	TArray<FString> AnimationFiles;
 	TArray<FString> MaterialManifestFiles;
 	TArray<FString> SkillFiles;
+	const bool bFormalOnly = AssetPackage->GetStringField(TEXT("deliveryMode")) == TEXT("formal-only");
+	const bool bFormalSuccess = AssetPackage->GetBoolField(TEXT("formalSuccess"));
 	const bool bHasTextures = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("textures"), TextureFiles);
 	const bool bHasModel = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("model"), ModelFiles);
 	const bool bHasAnimations = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("animations"), AnimationFiles);
 	const bool bHasMaterialManifest = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("materialManifest"), MaterialManifestFiles);
 	const bool bHasSkills = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("skills"), SkillFiles);
+
+	if (!bFormalOnly)
+	{
+		UE_LOG(LogTemp, Error, TEXT("  Asset package is not a formal-only export: %s"), *AssetPackagePath);
+		return;
+	}
+
+	if (!bFormalSuccess)
+	{
+		if (bImportModelOnly)
+		{
+			if (!(bHasTextures && bHasModel && bHasMaterialManifest))
+			{
+				UE_LOG(LogTemp, Error, TEXT("  Model-only import requires ready model, textures, and material manifest deliverables: %s"), *AssetPackagePath);
+				return;
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("  Asset package formalSuccess=false; proceeding with model-only import because required model deliverables are present."));
+		}
+		else if (bImportAnimationsOnly)
+		{
+			if (!bHasAnimations)
+			{
+				UE_LOG(LogTemp, Error, TEXT("  Animations-only import requires ready animation deliverables: %s"), *AssetPackagePath);
+				return;
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("  Asset package formalSuccess=false; proceeding with animations-only import because animation deliverables are present."));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("  Asset package is not a successful formal-only export: %s"), *AssetPackagePath);
+			return;
+		}
+	}
+
+	if (AnimFilters.Num() > 0)
+	{
+		const int32 OriginalAnimationCount = AnimationFiles.Num();
+		AnimationFiles = AnimationFiles.FilterByPredicate([&AnimFilters](const FString& AnimFile)
+		{
+			return MatchesAnimationFilter(FPaths::GetBaseFilename(AnimFile), AnimFilters);
+		});
+		UE_LOG(LogTemp, Display, TEXT("  AnimFilter: %d -> %d clips"), OriginalAnimationCount, AnimationFiles.Num());
+	}
 
 	if (AnimLimit > 0 && AnimationFiles.Num() > AnimLimit)
 	{
@@ -426,29 +539,38 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		UE_LOG(LogTemp, Display, TEXT("  AnimLimit=%d: truncating to first %d animations"), AnimLimit, AnimLimit);
 	}
 
-	// 1. Import textures (PNG only)
-	for (const FString& TextureFile : TextureFiles)
-	{
-		UObject* Result = ImportTexture(TextureFile, ChrContent / TEXT("Textures"));
-		if (Result)
-		{
-			TexCount++;
-		}
-		else
-		{
-			Errors.Add(FString::Printf(TEXT("texture import failed: %s"), *FPaths::GetCleanFilename(TextureFile)));
-		}
-	}
+	const int32 ExpectedAnimationCount = AnimationFiles.Num();
 
-	if (bHasTextures)
-		UE_LOG(LogTemp, Display, TEXT("  Textures: %d"), TexCount);
+	// 1. Import textures (PNG only)
+	if (!bImportAnimationsOnly)
+	{
+		for (const FString& TextureFile : TextureFiles)
+		{
+			UObject* Result = ImportTexture(TextureFile, ChrContent / TEXT("Textures"));
+			if (Result)
+			{
+				TexCount++;
+			}
+			else
+			{
+				Errors.Add(FString::Printf(TEXT("texture import failed: %s"), *FPaths::GetCleanFilename(TextureFile)));
+			}
+		}
+
+		if (bHasTextures)
+			UE_LOG(LogTemp, Display, TEXT("  Textures: %d"), TexCount);
+	}
 
 	// 2. Import model from formal asset package
 	FString ModelFile = bHasModel ? ModelFiles[0] : TEXT("");
 
-	USkeleton* Skeleton = nullptr;
+	USkeleton* Skeleton = FindSkeletonInPackage(ChrContent / TEXT("Mesh"));
+	if (!bImportModelOnly && Skeleton)
+	{
+		UE_LOG(LogTemp, Display, TEXT("  Existing skeleton: %s"), *Skeleton->GetPathName());
+	}
 
-	if (!ModelFile.IsEmpty())
+	if (!ModelFile.IsEmpty() && (!bImportAnimationsOnly || !Skeleton))
 	{
 		FString Extension = FPaths::GetExtension(ModelFile).ToLower();
 		UE_LOG(LogTemp, Display, TEXT("  Importing model: %s (format: %s)"), *FPaths::GetCleanFilename(ModelFile), *Extension);
@@ -498,7 +620,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			Errors.Add(FString::Printf(TEXT("model import failed: %s"), *FPaths::GetCleanFilename(ModelFile)));
 		}
 	}
-	else
+	else if (!bImportAnimationsOnly)
 	{
 		Errors.Add(TEXT("missing model deliverable"));
 	}
@@ -543,14 +665,14 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		if (AnimCount > 30)
 			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 	}
-	else
+	else if (!bImportModelOnly)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("  Animations: SKIPPED (no skeleton)"));
-		Errors.Add(TEXT("animations skipped because no skeleton was imported"));
+		Errors.Add(TEXT("animations skipped because no skeleton was available"));
 	}
 
 	// 4. Create material instances and bind CharacterData slots from the formal manifest
-	if (bHasMaterialManifest)
+	if (!bImportAnimationsOnly && bHasMaterialManifest)
 	{
 		TArray<UMaterialInstanceConstant*> MaterialInstances;
 		TArray<FString> MaterialErrors;
@@ -583,13 +705,13 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			}
 		}
 	}
-	else
+	else if (!bImportAnimationsOnly)
 	{
 		Errors.Add(TEXT("missing material manifest deliverable"));
 	}
 
 	// 5. Import skill configs
-	if (bHasSkills)
+	if (!bImportAnimationsOnly && !bImportModelOnly && bHasSkills)
 	{
 		const FString SkillSrc = SkillFiles[0];
 		FString SkillDst = FPaths::ProjectContentDir() / TEXT("SekiroAssets/Characters") / ChrId / TEXT("Skills/skill_config.json");
@@ -624,7 +746,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			Errors.Add(TEXT("failed to load CharacterData asset after skill import"));
 		}
 	}
-	else
+	else if (!bImportAnimationsOnly && !bImportModelOnly)
 	{
 		Errors.Add(TEXT("missing skills deliverable"));
 	}

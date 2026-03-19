@@ -50,7 +50,30 @@ namespace DSAnimStudio.Export
             if (string.IsNullOrWhiteSpace(textureName))
                 throw new ArgumentException("Formal texture naming requires a non-empty texture name.", nameof(textureName));
 
-            return $"{textureName}.png";
+            return $"{SanitizeTextureAssetName(textureName)}.png";
+        }
+
+        public static string SanitizeTextureAssetName(string textureName)
+        {
+            if (string.IsNullOrWhiteSpace(textureName))
+                throw new ArgumentException("Formal texture naming requires a non-empty texture name.", nameof(textureName));
+
+            string trimmed = textureName.Trim();
+            char[] sanitizedChars = new char[trimmed.Length];
+            int index = 0;
+            foreach (char ch in trimmed)
+            {
+                sanitizedChars[index++] = char.IsLetterOrDigit(ch) || ch == '_' ? ch : '_';
+            }
+
+            string sanitized = new string(sanitizedChars, 0, index).Trim('_');
+            while (sanitized.Contains("__", StringComparison.Ordinal))
+                sanitized = sanitized.Replace("__", "_", StringComparison.Ordinal);
+
+            if (string.IsNullOrWhiteSpace(sanitized))
+                throw new ArgumentException("Formal texture naming produced an empty sanitized name.", nameof(textureName));
+
+            return sanitized;
         }
 
         public static string BuildRelativeTexturePath(string textureFileName)
@@ -61,12 +84,22 @@ namespace DSAnimStudio.Export
             return Path.Combine("Textures", textureFileName).Replace('\\', '/');
         }
 
+        public static string BuildRelativeModelTexturePath(string textureFileName)
+        {
+            if (string.IsNullOrWhiteSpace(textureFileName))
+                throw new ArgumentException("Formal model texture path requires a non-empty file name.", nameof(textureFileName));
+
+            return Path.Combine("..", "Textures", textureFileName).Replace('\\', '/');
+        }
+
         public static string GetColorSpace(string slotType)
         {
             return slotType switch
             {
                 "BaseColor" => "sRGB",
+                "BaseColor2" => "sRGB",
                 "Emissive" => "sRGB",
+                "Emissive2" => "sRGB",
                 _ => "Linear",
             };
         }

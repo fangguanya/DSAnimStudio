@@ -82,6 +82,7 @@ namespace DSAnimStudioNETCore.Tests.Export
             Assert.That(FormalTextureContract.IsFormalSourceFormat("bc7"), Is.True);
             Assert.That(FormalTextureContract.BuildFormalTextureFileName("m1234_a"), Is.EqualTo("m1234_a.png"));
             Assert.That(FormalTextureContract.BuildRelativeTexturePath("m1234_a.png"), Is.EqualTo("Textures/m1234_a.png"));
+            Assert.That(FormalTextureContract.BuildRelativeModelTexturePath("m1234_a.png"), Is.EqualTo("../Textures/m1234_a.png"));
             Assert.That(FormalTextureContract.GetColorSpace("BaseColor"), Is.EqualTo("sRGB"));
             Assert.That(FormalTextureContract.GetColorSpace("Normal"), Is.EqualTo("Linear"));
         }
@@ -271,7 +272,7 @@ namespace DSAnimStudioNETCore.Tests.Export
             Assert.That(textureBindings, Is.Not.Null);
             foreach (var binding in textureBindings.Properties())
             {
-                var paramNames = new[] { "BaseColor", "Normal", "Specular", "Emissive", "Roughness", "BlendMask", "" };
+                var paramNames = new[] { "BaseColor", "BaseColor2", "Normal", "Normal2", "Specular", "Specular2", "Emissive", "Emissive2", "Roughness", "Roughness2", "BlendMask", "BlendMask3", "" };
                 Assert.That(paramNames, Contains.Item(binding.Name), 
                     $"Key '{binding.Name}' should be a valid parameter name");
             }
@@ -292,10 +293,38 @@ namespace DSAnimStudioNETCore.Tests.Export
                 var texInfo = binding.Value as JObject;
                 Assert.That(texInfo, Is.Not.Null);
                 Assert.That(texInfo["slotType"], Is.Not.Null, "slotType is required");
+                Assert.That(texInfo["slotIndex"], Is.Not.Null, "slotIndex is required");
                 Assert.That(texInfo["exportedFileName"], Is.Not.Null, "exportedFileName is required");
                 Assert.That(texInfo["relativePath"], Is.Not.Null, "relativePath is required");
                 Assert.That(texInfo["colorSpace"], Is.Not.Null, "colorSpace is required");
             }
+        }
+
+        [Test]
+        public void FormalMaterialTextureResolver_PreservesIndexedTextureParameters()
+        {
+            var flver = new SoulsFormats.FLVER2();
+            flver.Materials.Add(new SoulsFormats.FLVER2.Material
+            {
+                Name = "IndexedMaterial",
+                MTD = "Test.mtd",
+                Textures = new List<SoulsFormats.FLVER2.Texture>
+                {
+                    new SoulsFormats.FLVER2.Texture { Type = "g_Diffuse", Path = @"N:\SPRJ\data\Model\chr\c0000\body_d.tga" },
+                    new SoulsFormats.FLVER2.Texture { Type = "g_Diffuse_2", Path = @"N:\SPRJ\data\Model\chr\c0000\body_d2.tga" },
+                    new SoulsFormats.FLVER2.Texture { Type = "g_BlendMask", Path = @"N:\SPRJ\data\Model\chr\c0000\body_m.tga" },
+                    new SoulsFormats.FLVER2.Texture { Type = "g_Bumpmap", Path = @"N:\SPRJ\data\Model\chr\c0000\body_n.tga" },
+                    new SoulsFormats.FLVER2.Texture { Type = "g_Bumpmap_2", Path = @"N:\SPRJ\data\Model\chr\c0000\body_n2.tga" },
+                }
+            });
+
+            var bindings = FormalMaterialTextureResolver.Resolve(flver.Materials[0]).ToList();
+
+            Assert.That(bindings.Any(binding => binding.ParameterName == "BaseColor"), Is.True);
+            Assert.That(bindings.Any(binding => binding.ParameterName == "BaseColor2"), Is.True);
+            Assert.That(bindings.Any(binding => binding.ParameterName == "BlendMask"), Is.True);
+            Assert.That(bindings.Any(binding => binding.ParameterName == "Normal"), Is.True);
+            Assert.That(bindings.Any(binding => binding.ParameterName == "Normal2"), Is.True);
         }
 
         [Test]
