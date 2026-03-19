@@ -27,7 +27,7 @@ USekiroValidationCommandlet::USekiroValidationCommandlet()
 
 namespace
 {
-	static bool LoadJsonObjectFromFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject)
+	static bool LoadValidationJsonObjectFromFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject)
 	{
 		FString JsonString;
 		if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
@@ -495,7 +495,7 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 
 		const FString ManifestPath = ExportDir / ChrId / TEXT("Model/material_manifest.json");
 		TSharedPtr<FJsonObject> ManifestRoot;
-		if (LoadJsonObjectFromFile(ManifestPath, ManifestRoot))
+		if (LoadValidationJsonObjectFromFile(ManifestPath, ManifestRoot))
 		{
 			const TArray<TSharedPtr<FJsonValue>>* MaterialsArray = nullptr;
 			if (ManifestRoot->TryGetArrayField(TEXT("materials"), MaterialsArray) && MaterialsArray)
@@ -516,6 +516,17 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 						V.MaterialBindingErrors++;
 						UE_LOG(LogTemp, Error, TEXT("Validation: material instance missing for manifest entry '%s' at %s"), *AssetName, *AssetPath);
 						continue;
+					}
+
+					bool bExpectedTwoSided = false;
+					if (MaterialObj->TryGetBoolField(TEXT("twoSided"), bExpectedTwoSided))
+					{
+						const bool bActualTwoSided = MaterialInstance->IsTwoSided();
+						if (bActualTwoSided != bExpectedTwoSided)
+						{
+							V.MaterialBindingErrors++;
+							UE_LOG(LogTemp, Error, TEXT("Validation: material '%s' expected twoSided=%s but found %s."), *AssetName, bExpectedTwoSided ? TEXT("true") : TEXT("false"), bActualTwoSided ? TEXT("true") : TEXT("false"));
+						}
 					}
 
 					const TSharedPtr<FJsonObject>* TextureBindingsObj = nullptr;

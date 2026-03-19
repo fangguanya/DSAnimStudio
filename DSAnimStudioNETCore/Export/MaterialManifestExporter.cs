@@ -22,6 +22,7 @@ namespace DSAnimStudio.Export
             public int Index { get; set; }
             public string Name { get; set; }
             public string Mtd { get; set; }
+            public bool TwoSided { get; set; }
             public JArray Textures { get; set; }
             public JObject TextureBindings { get; set; }
             public JObject ScalarParameters { get; set; }
@@ -80,6 +81,7 @@ namespace DSAnimStudio.Export
                 {
                     var mat = flver.Materials[matIdx];
                     string key = BuildManifestSlotKey(mat.Name);
+                    bool twoSided = IsMaterialTwoSided(flver, matIdx, mat);
 
                     if (!manifestEntries.TryGetValue(key, out var manifestEntry))
                     {
@@ -88,6 +90,7 @@ namespace DSAnimStudio.Export
                             Index = nextMaterialIndex++,
                             Name = mat.Name ?? string.Empty,
                             Mtd = mat.MTD ?? string.Empty,
+                            TwoSided = twoSided,
                             Textures = BuildTextureArray(mat, textureFileExtension),
                             TextureBindings = BuildTextureBindings(mat, textureFileExtension),
                             ScalarParameters = BuildScalarParameters(mat, textureFileExtension),
@@ -98,6 +101,7 @@ namespace DSAnimStudio.Export
                     {
                         manifestEntry.Name = mat.Name ?? string.Empty;
                         manifestEntry.Mtd = mat.MTD ?? string.Empty;
+                        manifestEntry.TwoSided = manifestEntry.TwoSided || twoSided;
                         manifestEntry.Textures = BuildTextureArray(mat, textureFileExtension);
                         manifestEntry.TextureBindings = BuildTextureBindings(mat, textureFileExtension);
                         manifestEntry.ScalarParameters = BuildScalarParameters(mat, textureFileExtension);
@@ -121,6 +125,7 @@ namespace DSAnimStudio.Export
                 matObj["mtd"] = manifestEntry.Mtd;
                 matObj["materialInstanceKey"] = BuildMaterialInstanceKey(manifestEntry.Name, manifestEntry.Index);
                 matObj["slotName"] = manifestEntry.Name;
+                matObj["twoSided"] = manifestEntry.TwoSided;
                 matObj["textures"] = manifestEntry.Textures;
                 matObj["textureBindings"] = manifestEntry.TextureBindings;
                 matObj["scalarParameters"] = manifestEntry.ScalarParameters;
@@ -236,6 +241,33 @@ namespace DSAnimStudio.Export
         private static string BuildManifestSlotKey(string materialName)
         {
             return (materialName ?? string.Empty).Trim();
+        }
+
+        private static bool IsMaterialTwoSided(FLVER2 flver, int materialIndex, FLVER2.Material material)
+        {
+            if (material != null && !string.IsNullOrWhiteSpace(material.MTD))
+            {
+                string shortMaterialName = Path.GetFileNameWithoutExtension(material.MTD)?.ToLowerInvariant() ?? string.Empty;
+                if (shortMaterialName.Contains("_df_"))
+                    return true;
+            }
+
+            if (flver?.Meshes == null)
+                return false;
+
+            foreach (var mesh in flver.Meshes)
+            {
+                if (mesh == null || mesh.MaterialIndex != materialIndex)
+                    continue;
+
+                if (mesh.FaceSets == null)
+                    continue;
+
+                if (mesh.FaceSets.Any(faceSet => faceSet != null && !faceSet.CullBackfaces))
+                    return true;
+            }
+
+            return false;
         }
 
         public static string GetParameterName(TextureSlotType slotType)

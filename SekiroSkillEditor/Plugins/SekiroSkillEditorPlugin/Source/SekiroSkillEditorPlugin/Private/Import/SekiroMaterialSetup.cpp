@@ -279,8 +279,12 @@ namespace SekiroMaterialSetupInternal
 		EditorOnlyData->Specular.Connect(0, SpecularBlend);
 		EditorOnlyData->Roughness.Connect(0, RoughnessBlend);
 		EditorOnlyData->EmissiveColor.Connect(0, EmissiveFinal);
+		Material->MaterialDomain = MD_Surface;
+		Material->BlendMode = BLEND_Opaque;
+		Material->SetShadingModel(MSM_DefaultLit);
 		Material->bUsedWithSkeletalMesh = true;
 		Material->TwoSided = false;
+		Material->bDisableDepthTest = false;
 		Material->PostEditChange();
 		Material->MarkPackageDirty();
 		if (bCreatedNewMaterial)
@@ -478,6 +482,10 @@ bool USekiroMaterialSetup::SetupMaterialsFromManifestStrict(
 
 		MatInstance->SetParentEditorOnly(ParentMaterial);
 		const int32 ErrorCountBeforeMaterial = OutErrors.Num();
+		bool bTwoSided = false;
+		MaterialObj->TryGetBoolField(TEXT("twoSided"), bTwoSided);
+		MatInstance->BasePropertyOverrides.bOverride_TwoSided = true;
+		MatInstance->BasePropertyOverrides.TwoSided = bTwoSided;
 
 		const TSharedPtr<FJsonObject>* TextureBindingsObj = nullptr;
 		if (MaterialObj->TryGetObjectField(TEXT("textureBindings"), TextureBindingsObj) && TextureBindingsObj && TextureBindingsObj->IsValid())
