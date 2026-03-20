@@ -26,6 +26,7 @@ public:
 	virtual FLinearColor GetWorldCentricTabColorScale() const override;
 	virtual void RegisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager) override;
 	virtual void UnregisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager) override;
+	virtual void SaveAsset_Execute() override;
 
 private:
 	static const FName ViewportTabId;

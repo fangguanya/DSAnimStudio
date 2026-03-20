@@ -30,8 +30,12 @@ private:
 		int32 BoneCount = 0;
 		int32 MeshSectionCount = 0;
 		int32 VertexCount = 0;
+		bool bVisiblePoseValidated = false;
+		int32 VisiblePoseErrors = 0;
 		// Animations
+		int32 ExpectedAnimationCount = 0;
 		int32 AnimSequenceCount = 0;
+		int32 MissingExpectedAnimationAssets = 0;
 		int32 AnimsWithZeroDuration = 0;
 		int32 AnimsWithZeroTracks = 0;
 		int32 AnimsWithWrongSkeleton = 0;
@@ -55,6 +59,12 @@ private:
 		int32 SkillAnimsWithMatchingAsset = 0;
 		int32 SkillAnimsWithoutMatchingAsset = 0;
 		int32 SkillAnimsSharedPool = 0; // a000_* shared animations (expected unmatched)
+		// Semantic-level checks (Task 5.4)
+		bool bMasterMaterialExists = false;
+		int32 MaterialsWithWrongParent = 0;
+		int32 AnimsWithoutRootMotion = 0;
+		int32 SkillAssetsWithoutAnimation = 0;
+		bool bHasCharacterDataAsset = false;
 
 		int32 GetErrorCount() const;
 		int32 GetWarningCount() const;

@@ -50,6 +50,9 @@ private:
 	/** Delegate wiring: timeline scrubbing -> preview actor. */
 	static void OnFrameScrubbed(float InFrame);
 
+	/** Delegate wiring: browser double-click -> open asset editor. */
+	static void OnSkillDoubleClicked(USekiroSkillDataAsset* InSkillData);
+
 	// ---- Persistent widget pointers (valid while tab is open) ----
 
 	static TSharedPtr<SSekiroSkillTimeline>   Timeline;

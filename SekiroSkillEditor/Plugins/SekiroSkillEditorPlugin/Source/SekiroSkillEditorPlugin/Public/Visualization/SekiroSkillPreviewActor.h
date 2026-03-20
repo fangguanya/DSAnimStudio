@@ -10,6 +10,7 @@
 class USkeletalMeshComponent;
 class USekiroCharacterData;
 class USekiroSkillDataAsset;
+class ULineBatchComponent;
 
 /**
  * Preview actor that displays a Sekiro character's skeletal mesh
@@ -85,10 +86,39 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Preview")
 	float GetCurrentFrame() const;
 
+	/**
+	 * Update attack hitbox visualization based on active events at the current frame.
+	 * Resolves DummyPoly positions from the skeleton and draws debug spheres/capsules
+	 * based on BehaviorParam → AtkParam chain resolution.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Preview")
+	void UpdateAttackVisualization();
+
+	/**
+	 * Update effect/sound point visualization for active events at the current frame.
+	 * Draws markers at DummyPoly positions for Effect and Sound category events.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Preview")
+	void UpdateEffectSoundVisualization();
+
+	/** Whether attack hitboxes are shown in the viewport. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preview|Visualization")
+	bool bShowAttackHitboxes = true;
+
+	/** Whether effect/sound point markers are shown in the viewport. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preview|Visualization")
+	bool bShowEffectSoundPoints = true;
+
 	// -- AActor overrides ----------------------------------------------------
 
 	virtual void Tick(float DeltaSeconds) override;
 
 private:
 	void ApplyCurrentRootMotion();
+
+	/**
+	 * Resolve a DummyPoly reference to a world-space position using the current skeleton pose.
+	 * @return true if the position was resolved, false if the DummyPoly or bone was not found.
+	 */
+	bool ResolveDummyPolyWorldPosition(int32 DummyPolyId, FVector& OutWorldPos) const;
 };

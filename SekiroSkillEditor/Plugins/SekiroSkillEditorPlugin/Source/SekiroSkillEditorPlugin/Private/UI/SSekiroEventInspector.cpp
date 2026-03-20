@@ -1,6 +1,8 @@
 // Copyright (c) 2026 SekiroSkillEditor. All Rights Reserved.
 
 #include "UI/SSekiroEventInspector.h"
+#include "Data/SekiroCharacterData.h"
+#include "Data/SekiroSkillDataAsset.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SBorder.h"
@@ -47,6 +49,24 @@ void SSekiroEventInspector::ClearEvent()
 	CurrentEvent.Reset();
 	bHasEvent = false;
 	RebuildContent();
+}
+
+void SSekiroEventInspector::SetCharacterData(USekiroCharacterData* InCharacterData)
+{
+	CharacterData = InCharacterData;
+	if (bHasEvent)
+	{
+		RebuildContent();
+	}
+}
+
+void SSekiroEventInspector::SetSkillData(USekiroSkillDataAsset* InSkillData)
+{
+	SkillData = InSkillData;
+	if (bHasEvent)
+	{
+		RebuildContent();
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +241,269 @@ void SSekiroEventInspector::RebuildContent()
 			}
 		}
 	}
+
+	// ---- Resolved DummyPoly ----
+	BuildResolvedDummyPolySection(Evt, RowIndex);
+
+	// ---- Resolved Parameter Chain ----
+	BuildResolvedParamChainSection(Evt, RowIndex);
+
+	// ---- Root-Motion ----
+	BuildRootMotionSection(Evt, RowIndex);
 }
+
+// ---------------------------------------------------------------------------
+// Resolved semantic sections
+// ---------------------------------------------------------------------------
+
+void SSekiroEventInspector::BuildResolvedDummyPolySection(const FSekiroTaeEvent& Evt, int32& RowIndex)
+{
+	// Look for DummyPoly references in semantic links
+	TArray<int32> DummyPolyIds;
+	for (const FSekiroSemanticLink& Link : Evt.SemanticLinks)
+	{
+		if (Link.Name.Contains(TEXT("DummyPoly")) || Link.Name.Contains(TEXT("dummyPoly")))
+		{
+			int32 Id = FCString::Atoi(*Link.ValueJson);
+			if (Id != 0 || Link.ValueJson == TEXT("0"))
+			{
+				DummyPolyIds.Add(Id);
+			}
+		}
+	}
+
+	if (DummyPolyIds.Num() == 0)
+	{
+		return;
+	}
+
+	ContentBox->AddSlot()
+	.AutoHeight()
+	.Padding(4.0f, 6.0f)
+	[
+		SNew(STextBlock)
+		.Text(FText::FromString(TEXT("Resolved DummyPoly")))
+		.Font(FCoreStyle::Get().GetFontStyle("NormalFont"))
+		.ColorAndOpacity(FSlateColor(FLinearColor(0.6f, 0.9f, 0.6f)))
+	];
+
+	USekiroCharacterData* CharData = CharacterData.Get();
+	for (int32 DpId : DummyPolyIds)
+	{
+		if (CharData)
+		{
+			const FSekiroDummyPoly* Dp = CharData->FindDummyPoly(DpId);
+			if (Dp)
+			{
+				ContentBox->AddSlot().AutoHeight()
+				[
+					MakePropertyRow(
+						FString::Printf(TEXT("DP#%d Bone"), DpId),
+						Dp->ParentBoneName,
+						(RowIndex++ % 2 == 0))
+				];
+				ContentBox->AddSlot().AutoHeight()
+				[
+					MakePropertyRow(
+						FString::Printf(TEXT("DP#%d Position"), DpId),
+						FString::Printf(TEXT("(%.2f, %.2f, %.2f)"), Dp->LocalPosition.X, Dp->LocalPosition.Y, Dp->LocalPosition.Z),
+						(RowIndex++ % 2 == 0))
+				];
+			}
+			else
+			{
+				ContentBox->AddSlot().AutoHeight()
+				[
+					MakePropertyRow(
+						FString::Printf(TEXT("DP#%d"), DpId),
+						TEXT("(not found in character data)"),
+						(RowIndex++ % 2 == 0))
+				];
+			}
+		}
+		else
+		{
+			ContentBox->AddSlot().AutoHeight()
+			[
+				MakePropertyRow(
+					FString::Printf(TEXT("DP#%d"), DpId),
+					TEXT("(no character data loaded)"),
+					(RowIndex++ % 2 == 0))
+			];
+		}
+	}
+}
+
+void SSekiroEventInspector::BuildResolvedParamChainSection(const FSekiroTaeEvent& Evt, int32& RowIndex)
+{
+	// Look for parameter references in semantic links (BehaviorParam, AtkParam, SpEffect, EquipParamWeapon)
+	struct FParamRef
+	{
+		FString ParamType;
+		int32 RowId;
+	};
+	TArray<FParamRef> ParamRefs;
+
+	for (const FSekiroSemanticLink& Link : Evt.SemanticLinks)
+	{
+		if (Link.Name.Contains(TEXT("BehaviorParam")) || Link.Name.Contains(TEXT("AtkParam")) ||
+			Link.Name.Contains(TEXT("SpEffect")) || Link.Name.Contains(TEXT("EquipParamWeapon")))
+		{
+			int32 Id = FCString::Atoi(*Link.ValueJson);
+			if (Id != 0 || Link.ValueJson == TEXT("0"))
+			{
+				FParamRef Ref;
+				if (Link.Name.Contains(TEXT("BehaviorParam"))) Ref.ParamType = TEXT("BehaviorParam");
+				else if (Link.Name.Contains(TEXT("AtkParam"))) Ref.ParamType = TEXT("AtkParam");
+				else if (Link.Name.Contains(TEXT("SpEffect"))) Ref.ParamType = TEXT("SpEffect");
+				else Ref.ParamType = TEXT("EquipParamWeapon");
+				Ref.RowId = Id;
+				ParamRefs.Add(Ref);
+			}
+		}
+	}
+
+	if (ParamRefs.Num() == 0)
+	{
+		return;
+	}
+
+	ContentBox->AddSlot()
+	.AutoHeight()
+	.Padding(4.0f, 6.0f)
+	[
+		SNew(STextBlock)
+		.Text(FText::FromString(TEXT("Resolved Parameter Chain")))
+		.Font(FCoreStyle::Get().GetFontStyle("NormalFont"))
+		.ColorAndOpacity(FSlateColor(FLinearColor(0.55f, 0.75f, 0.95f)))
+	];
+
+	USekiroCharacterData* CharData = CharacterData.Get();
+	for (const FParamRef& Ref : ParamRefs)
+	{
+		if (!CharData)
+		{
+			ContentBox->AddSlot().AutoHeight()
+			[
+				MakePropertyRow(
+					FString::Printf(TEXT("%s[%d]"), *Ref.ParamType, Ref.RowId),
+					TEXT("(no character data loaded)"),
+					(RowIndex++ % 2 == 0))
+			];
+			continue;
+		}
+
+		// Look up the param row in the appropriate cache
+		const TMap<int32, FSekiroParamRow>* ParamMap = nullptr;
+		if (Ref.ParamType == TEXT("BehaviorParam"))
+			ParamMap = &CharData->BehaviorParamsPlayer;
+		else if (Ref.ParamType == TEXT("AtkParam"))
+			ParamMap = &CharData->AtkParamsPlayer;
+		else if (Ref.ParamType == TEXT("SpEffect"))
+			ParamMap = &CharData->SpEffectParams;
+		else if (Ref.ParamType == TEXT("EquipParamWeapon"))
+			ParamMap = &CharData->EquipParamWeapon;
+
+		if (ParamMap)
+		{
+			const FSekiroParamRow* Row = ParamMap->Find(Ref.RowId);
+			if (Row)
+			{
+				ContentBox->AddSlot().AutoHeight()
+				[
+					MakePropertyRow(
+						FString::Printf(TEXT("%s[%d]"), *Ref.ParamType, Ref.RowId),
+						Row->Name,
+						(RowIndex++ % 2 == 0))
+				];
+				for (const FSekiroParamField& Field : Row->Fields)
+				{
+					ContentBox->AddSlot().AutoHeight()
+					[
+						MakePropertyRow(
+							FString::Printf(TEXT("  %s"), *Field.Name),
+							Field.ValueJson,
+							(RowIndex++ % 2 == 0))
+					];
+				}
+			}
+			else
+			{
+				ContentBox->AddSlot().AutoHeight()
+				[
+					MakePropertyRow(
+						FString::Printf(TEXT("%s[%d]"), *Ref.ParamType, Ref.RowId),
+						TEXT("(row not found)"),
+						(RowIndex++ % 2 == 0))
+				];
+			}
+		}
+	}
+}
+
+void SSekiroEventInspector::BuildRootMotionSection(const FSekiroTaeEvent& Evt, int32& RowIndex)
+{
+	USekiroSkillDataAsset* Skill = SkillData.Get();
+	if (!Skill || Skill->RootMotion.Samples.Num() == 0)
+	{
+		return;
+	}
+
+	// Only show root-motion section for Movement category events or if frame range covers motion
+	if (Evt.Category != TEXT("Movement"))
+	{
+		return;
+	}
+
+	ContentBox->AddSlot()
+	.AutoHeight()
+	.Padding(4.0f, 6.0f)
+	[
+		SNew(STextBlock)
+		.Text(FText::FromString(TEXT("Root Motion (in event range)")))
+		.Font(FCoreStyle::Get().GetFontStyle("NormalFont"))
+		.ColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.85f, 0.4f)))
+	];
+
+	// Sample root-motion at start and end of event
+	FSekiroRootMotionSample StartSample, EndSample;
+	const bool bHasStart = Skill->GetRootMotionSampleAtFrame(Evt.StartFrame, StartSample);
+	const bool bHasEnd = Skill->GetRootMotionSampleAtFrame(Evt.EndFrame, EndSample);
+
+	if (bHasStart && bHasEnd)
+	{
+		const FVector Delta = EndSample.Translation - StartSample.Translation;
+		const float YawDelta = EndSample.YawRadians - StartSample.YawRadians;
+
+		ContentBox->AddSlot().AutoHeight()
+		[
+			MakePropertyRow(TEXT("Start Translation"), FString::Printf(TEXT("(%.2f, %.2f, %.2f)"), StartSample.Translation.X, StartSample.Translation.Y, StartSample.Translation.Z), (RowIndex++ % 2 == 0))
+		];
+		ContentBox->AddSlot().AutoHeight()
+		[
+			MakePropertyRow(TEXT("End Translation"), FString::Printf(TEXT("(%.2f, %.2f, %.2f)"), EndSample.Translation.X, EndSample.Translation.Y, EndSample.Translation.Z), (RowIndex++ % 2 == 0))
+		];
+		ContentBox->AddSlot().AutoHeight()
+		[
+			MakePropertyRow(TEXT("Delta Translation"), FString::Printf(TEXT("(%.2f, %.2f, %.2f)"), Delta.X, Delta.Y, Delta.Z), (RowIndex++ % 2 == 0))
+		];
+		ContentBox->AddSlot().AutoHeight()
+		[
+			MakePropertyRow(TEXT("Yaw Delta (rad)"), FString::Printf(TEXT("%.4f"), YawDelta), (RowIndex++ % 2 == 0))
+		];
+	}
+	else
+	{
+		ContentBox->AddSlot().AutoHeight()
+		[
+			MakePropertyRow(TEXT("Root Motion"), TEXT("(samples not available for this frame range)"), (RowIndex++ % 2 == 0))
+		];
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row helper
+// ---------------------------------------------------------------------------
 
 TSharedRef<SWidget> SSekiroEventInspector::MakePropertyRow(
 	const FString& Label,

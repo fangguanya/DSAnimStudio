@@ -8,6 +8,7 @@
 #include "Data/SekiroSkillDataAsset.h"
 #include "Engine/SkeletalMesh.h"
 #include "Materials/MaterialInterface.h"
+#include "DrawDebugHelpers.h"
 
 ASekiroSkillPreviewActor::ASekiroSkillPreviewActor()
 {
@@ -50,6 +51,14 @@ void ASekiroSkillPreviewActor::SetCharacterData(USekiroCharacterData* InCharacte
 				{
 					MeshComp->SetMaterial(SlotIdx, LoadedMat);
 				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("SekiroSkillPreviewActor: material slot '%s' has unresolvable formal reference"), *SlotName.ToString());
+				}
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("SekiroSkillPreviewActor: material slot '%s' has no formal manifest binding"), *SlotName.ToString());
 			}
 		}
 	}
@@ -114,6 +123,8 @@ void ASekiroSkillPreviewActor::SetPlaybackPosition(float Frame)
 	}
 
 	ApplyCurrentRootMotion();
+	UpdateAttackVisualization();
+	UpdateEffectSoundVisualization();
 }
 
 float ASekiroSkillPreviewActor::GetCurrentFrame() const
@@ -148,6 +159,8 @@ void ASekiroSkillPreviewActor::Tick(float DeltaSeconds)
 	const float TimePosition = CurrentFrame / FrameRate;
 	MeshComp->SetPosition(TimePosition);
 	ApplyCurrentRootMotion();
+	UpdateAttackVisualization();
+	UpdateEffectSoundVisualization();
 }
 
 void ASekiroSkillPreviewActor::ApplyCurrentRootMotion()
@@ -169,4 +182,220 @@ void ASekiroSkillPreviewActor::ApplyCurrentRootMotion()
 
 	SetActorLocation(Sample.Translation);
 	SetActorRotation(FRotator(0.0f, FMath::RadiansToDegrees(Sample.YawRadians), 0.0f));
+}
+
+bool ASekiroSkillPreviewActor::ResolveDummyPolyWorldPosition(int32 DummyPolyId, FVector& OutWorldPos) const
+{
+	if (!CurrentCharacterData || !MeshComp || !MeshComp->GetSkeletalMeshAsset())
+	{
+		return false;
+	}
+
+	const FSekiroDummyPoly* Dp = CurrentCharacterData->FindDummyPoly(DummyPolyId);
+	if (!Dp)
+	{
+		return false;
+	}
+
+	// Find the bone index for the attach bone
+	const FName BoneName(*Dp->AttachBoneName);
+	const int32 BoneIdx = MeshComp->GetBoneIndex(BoneName);
+	if (BoneIdx == INDEX_NONE)
+	{
+		return false;
+	}
+
+	// Get the bone's world transform and apply the DummyPoly's local offset
+	const FTransform BoneWorldTransform = MeshComp->GetBoneTransform(BoneIdx);
+	OutWorldPos = BoneWorldTransform.TransformPosition(Dp->LocalPosition);
+	return true;
+}
+
+void ASekiroSkillPreviewActor::UpdateAttackVisualization()
+{
+	if (!bShowAttackHitboxes || !CurrentSkillData || !CurrentCharacterData)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Get all events active at the current frame
+	TArray<FSekiroTaeEvent> ActiveEvents = CurrentSkillData->GetEventAtFrame(CurrentFrame);
+
+	for (const FSekiroTaeEvent& Evt : ActiveEvents)
+	{
+		// Only visualize Attack-category events
+		if (Evt.Category != TEXT("Attack"))
+		{
+			continue;
+		}
+
+		// Resolve DummyPoly references from semantic links
+		for (const FSekiroSemanticLink& Link : Evt.SemanticLinks)
+		{
+			if (!Link.Name.Contains(TEXT("DummyPoly")) && !Link.Name.Contains(TEXT("dummyPoly")))
+			{
+				continue;
+			}
+
+			int32 DpId = FCString::Atoi(*Link.ValueJson);
+			FVector WorldPos;
+			if (ResolveDummyPolyWorldPosition(DpId, WorldPos))
+			{
+				// Determine radius from AtkParam if available
+				float HitRadius = 30.0f; // Default radius in cm
+
+				// Try to find atkId from event params
+				const FString* AtkIdStr = Evt.Parameters.Find(TEXT("atkId"));
+				if (AtkIdStr)
+				{
+					int32 AtkId = FCString::Atoi(**AtkIdStr);
+					// Check player AtkParams first, then NPC
+					const FSekiroParamRow* AtkRow = CurrentCharacterData->AtkParamsPlayer.Find(AtkId);
+					if (!AtkRow)
+					{
+						AtkRow = CurrentCharacterData->AtkParamsNpc.Find(AtkId);
+					}
+					if (AtkRow)
+					{
+						for (const FSekiroParamField& Field : AtkRow->Fields)
+						{
+							if (Field.Name == TEXT("hit0_Radius") || Field.Name == TEXT("hitRadius"))
+							{
+								HitRadius = FCString::Atof(*Field.ValueJson);
+								if (HitRadius < 1.0f) HitRadius = 30.0f;
+								break;
+							}
+						}
+					}
+				}
+
+				// Draw debug sphere at resolved DummyPoly position
+				DrawDebugSphere(
+					World,
+					WorldPos,
+					HitRadius,
+					12,
+					FColor::Red,
+					false, // persistent
+					-1.0f, // lifetime (single frame)
+					0,     // depth priority
+					2.0f   // thickness
+				);
+			}
+		}
+
+		// Also check direct behaviorJudgeId → BehaviorParam → DummyPoly chain
+		const FString* BehaviorIdStr = Evt.Parameters.Find(TEXT("behaviorJudgeId"));
+		if (BehaviorIdStr)
+		{
+			int32 BehaviorId = FCString::Atoi(**BehaviorIdStr);
+			const FSekiroParamRow* BhvRow = CurrentCharacterData->BehaviorParamsPlayer.Find(BehaviorId);
+			if (!BhvRow)
+			{
+				BhvRow = CurrentCharacterData->BehaviorParamsNpc.Find(BehaviorId);
+			}
+			if (BhvRow)
+			{
+				// Extract refId (DummyPoly reference) from behavior param
+				for (const FSekiroParamField& Field : BhvRow->Fields)
+				{
+					if (Field.Name == TEXT("refId") || Field.Name == TEXT("dmypolyId"))
+					{
+						int32 DpId = FCString::Atoi(*Field.ValueJson);
+						FVector WorldPos;
+						if (ResolveDummyPolyWorldPosition(DpId, WorldPos))
+						{
+							DrawDebugSphere(
+								World,
+								WorldPos,
+								25.0f,
+								8,
+								FColor::Yellow,
+								false,
+								-1.0f,
+								0,
+								1.5f
+							);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+void ASekiroSkillPreviewActor::UpdateEffectSoundVisualization()
+{
+	if (!bShowEffectSoundPoints || !CurrentSkillData || !CurrentCharacterData)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	TArray<FSekiroTaeEvent> ActiveEvents = CurrentSkillData->GetEventAtFrame(CurrentFrame);
+
+	for (const FSekiroTaeEvent& Evt : ActiveEvents)
+	{
+		FColor MarkerColor;
+		if (Evt.Category == TEXT("Effect"))
+		{
+			MarkerColor = FColor::Cyan;
+		}
+		else if (Evt.Category == TEXT("Sound"))
+		{
+			MarkerColor = FColor::Green;
+		}
+		else if (Evt.Category == TEXT("WeaponArt") || Evt.Category == TEXT("Prosthetic"))
+		{
+			MarkerColor = FColor::Magenta;
+		}
+		else
+		{
+			continue;
+		}
+
+		for (const FSekiroSemanticLink& Link : Evt.SemanticLinks)
+		{
+			if (!Link.Name.Contains(TEXT("DummyPoly")) && !Link.Name.Contains(TEXT("dummyPoly")))
+			{
+				continue;
+			}
+
+			int32 DpId = FCString::Atoi(*Link.ValueJson);
+			FVector WorldPos;
+			if (ResolveDummyPolyWorldPosition(DpId, WorldPos))
+			{
+				DrawDebugPoint(World, WorldPos, 12.0f, MarkerColor, false, -1.0f);
+
+				if (Evt.Category == TEXT("Effect"))
+				{
+					const FSekiroDummyPoly* Dp = CurrentCharacterData->FindDummyPoly(DpId);
+					if (Dp)
+					{
+						const FName BoneName(*Dp->AttachBoneName);
+						const int32 BoneIdx = MeshComp->GetBoneIndex(BoneName);
+						if (BoneIdx != INDEX_NONE)
+						{
+							const FTransform BoneWorldTransform = MeshComp->GetBoneTransform(BoneIdx);
+							FVector ForwardDir = BoneWorldTransform.TransformVector(Dp->Forward);
+							DrawDebugDirectionalArrow(
+								World, WorldPos, WorldPos + ForwardDir * 20.0f,
+								5.0f, MarkerColor, false, -1.0f, 0, 1.0f);
+						}
+					}
+				}
+			}
+		}
+	}
 }

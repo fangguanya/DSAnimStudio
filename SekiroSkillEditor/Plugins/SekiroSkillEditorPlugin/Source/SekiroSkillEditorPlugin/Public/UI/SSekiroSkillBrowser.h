@@ -14,6 +14,12 @@
 DECLARE_DELEGATE_OneParam(FOnSkillSelected, USekiroSkillDataAsset* /*SelectedSkill*/);
 
 /**
+ * Delegate fired when a skill asset is double-clicked in the browser.
+ * Used to open the dedicated asset editor.
+ */
+DECLARE_DELEGATE_OneParam(FOnSkillDoubleClicked, USekiroSkillDataAsset* /*DoubleClickedSkill*/);
+
+/**
  * A tree-structured item used in the skill browser.
  * Root-level items are character groups; children are individual skills.
  */
@@ -41,6 +47,7 @@ class SEKIROSKILLEDITORPLUGIN_API SSekiroSkillBrowser : public SCompoundWidget
 public:
 	SLATE_BEGIN_ARGS(SSekiroSkillBrowser) {}
 		SLATE_EVENT(FOnSkillSelected, OnSkillSelected)
+		SLATE_EVENT(FOnSkillDoubleClicked, OnSkillDoubleClicked)
 	SLATE_END_ARGS()
 
 	/** Construct this widget. */
@@ -64,6 +71,9 @@ private:
 		TSharedPtr<FSekiroSkillBrowserItem> Item,
 		ESelectInfo::Type SelectInfo);
 
+	void OnItemDoubleClicked(
+		TSharedPtr<FSekiroSkillBrowserItem> Item);
+
 	// ---- Data ----
 
 	/** Root items in the tree (one per CharacterId). */
@@ -74,4 +84,7 @@ private:
 
 	/** Selection delegate. */
 	FOnSkillSelected OnSkillSelected;
+
+	/** Double-click delegate. */
+	FOnSkillDoubleClicked OnSkillDoubleClicked;
 };

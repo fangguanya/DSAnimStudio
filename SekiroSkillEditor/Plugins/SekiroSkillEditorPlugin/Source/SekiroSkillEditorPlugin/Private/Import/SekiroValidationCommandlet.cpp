@@ -9,6 +9,8 @@
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Import/SekiroHumanoidValidation.h"
+#include "Data/SekiroSkillDataAsset.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -60,6 +62,32 @@ namespace
 		}
 		return MaterialKey;
 	}
+
+	static bool GetStringArrayField(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName, TArray<FString>& OutValues)
+	{
+		OutValues.Reset();
+		if (!JsonObject.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ValuesArray = nullptr;
+		if (!JsonObject->TryGetArrayField(FieldName, ValuesArray) || !ValuesArray)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Value : *ValuesArray)
+		{
+			const FString StringValue = Value.IsValid() ? Value->AsString() : FString();
+			if (!StringValue.IsEmpty())
+			{
+				OutValues.Add(StringValue);
+			}
+		}
+
+		return OutValues.Num() > 0;
+	}
 }
 
 int32 USekiroValidationCommandlet::FCharacterValidation::GetErrorCount() const
@@ -69,11 +97,15 @@ int32 USekiroValidationCommandlet::FCharacterValidation::GetErrorCount() const
 	if (!bHasSkeletalMesh) Errors++;
 	if (bHasSkeletalMesh && !bHasPhysicsAsset) Errors++;
 	if (BoneCount == 0 && bHasSkeleton) Errors++;
+	Errors += VisiblePoseErrors;
+	Errors += MissingExpectedAnimationAssets;
 	Errors += AnimsWithZeroDuration;
 	Errors += AnimsWithZeroTracks;
 	Errors += AnimsWithWrongSkeleton;
 	Errors += MaterialBindingErrors;
 	Errors += SkillSchemaErrors;
+	Errors += MaterialsWithWrongParent;
+	Errors += SkillAssetsWithoutAnimation;
 	// TexturesWithZeroSize excluded: GetSizeX() returns 0 in commandlet/headless mode (no GPU)
 	return Errors;
 }
@@ -179,7 +211,11 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 		CharacterReport->SetBoolField(TEXT("hasSkeletalMesh"), V.bHasSkeletalMesh);
 		CharacterReport->SetBoolField(TEXT("hasPhysicsAsset"), V.bHasPhysicsAsset);
 		CharacterReport->SetNumberField(TEXT("boneCount"), V.BoneCount);
+		CharacterReport->SetBoolField(TEXT("visiblePoseValidated"), V.bVisiblePoseValidated);
+		CharacterReport->SetNumberField(TEXT("visiblePoseErrors"), V.VisiblePoseErrors);
+		CharacterReport->SetNumberField(TEXT("expectedAnimationCount"), V.ExpectedAnimationCount);
 		CharacterReport->SetNumberField(TEXT("animationCount"), V.AnimSequenceCount);
+		CharacterReport->SetNumberField(TEXT("missingExpectedAnimationAssets"), V.MissingExpectedAnimationAssets);
 		CharacterReport->SetNumberField(TEXT("textureCount"), V.TextureCount);
 		CharacterReport->SetNumberField(TEXT("materialCount"), V.MaterialCount);
 		CharacterReport->SetNumberField(TEXT("expectedMaterialTextureBindings"), V.ExpectedMaterialTextureBindings);
@@ -187,6 +223,11 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 		CharacterReport->SetNumberField(TEXT("materialBindingErrors"), V.MaterialBindingErrors);
 		CharacterReport->SetBoolField(TEXT("hasSkillConfig"), V.bHasSkillConfig);
 		CharacterReport->SetNumberField(TEXT("skillEventCount"), V.SkillEventCount);
+		CharacterReport->SetBoolField(TEXT("masterMaterialExists"), V.bMasterMaterialExists);
+		CharacterReport->SetNumberField(TEXT("materialsWithWrongParent"), V.MaterialsWithWrongParent);
+		CharacterReport->SetNumberField(TEXT("animsWithoutRootMotion"), V.AnimsWithoutRootMotion);
+		CharacterReport->SetNumberField(TEXT("skillAssetsWithoutAnimation"), V.SkillAssetsWithoutAnimation);
+		CharacterReport->SetBoolField(TEXT("hasCharacterDataAsset"), V.bHasCharacterDataAsset);
 		CharacterReport->SetNumberField(TEXT("errorCount"), V.GetErrorCount());
 		CharacterReport->SetNumberField(TEXT("warningCount"), V.GetWarningCount());
 		CharacterReports.Add(MakeShared<FJsonValueObject>(CharacterReport));
@@ -245,6 +286,10 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: Imported as StaticMesh instead of SkeletalMesh"), *ChrId));
 		if (V.bHasSkeletalMesh && !V.bHasPhysicsAsset)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: SkeletalMesh has no PhysicsAsset"), *ChrId));
+		if (V.VisiblePoseErrors > 0)
+			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d visible humanoid pose validation errors"), *ChrId, V.VisiblePoseErrors));
+		if (V.MissingExpectedAnimationAssets > 0)
+			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d exporter-declared animations are missing after import"), *ChrId, V.MissingExpectedAnimationAssets));
 		if (V.BoneCount == 0 && V.bHasSkeleton)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: Skeleton has 0 bones"), *ChrId));
 		if (V.AnimsWithZeroDuration > 0)
@@ -257,6 +302,10 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d material texture bindings failed manifest validation"), *ChrId, V.MaterialBindingErrors));
 		if (V.SkillSchemaErrors > 0)
 			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: skill_config.json has %d canonical schema violations"), *ChrId, V.SkillSchemaErrors));
+		if (V.MaterialsWithWrongParent > 0)
+			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d material instances not using formal M_SekiroMaster parent"), *ChrId, V.MaterialsWithWrongParent));
+		if (V.SkillAssetsWithoutAnimation > 0)
+			ErrorMessages.Add(FString::Printf(TEXT("  [ERROR] %s: %d skill data assets are missing animation references"), *ChrId, V.SkillAssetsWithoutAnimation));
 		// TexturesWithZeroSize not reported — false positive in headless mode
 
 		if (V.AnimSequenceCount == 0 && V.bHasSkeleton)
@@ -267,6 +316,8 @@ int32 USekiroValidationCommandlet::Main(const FString& Params)
 
 		// Count errors: exported models must yield skeletal assets, not static fallbacks.
 		int32 ChrErrors = V.AnimsWithZeroDuration + V.AnimsWithZeroTracks;
+		ChrErrors += V.VisiblePoseErrors;
+		ChrErrors += V.MissingExpectedAnimationAssets;
 		ChrErrors += V.AnimsWithWrongSkeleton;
 		ChrErrors += V.MaterialBindingErrors;
 		ChrErrors += V.SkillSchemaErrors;
@@ -381,6 +432,7 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 		AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Mesh"))), MeshAssets, true);
 
 		USkeleton* FoundSkeleton = nullptr;
+		USkeletalMesh* FoundSkeletalMesh = nullptr;
 
 		for (const FAssetData& AssetData : MeshAssets)
 		{
@@ -390,6 +442,7 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 			if (USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(Asset))
 			{
 				V.bHasSkeletalMesh = true;
+				FoundSkeletalMesh = SkelMesh;
 				V.bHasPhysicsAsset = V.bHasPhysicsAsset || (SkelMesh->GetPhysicsAsset() != nullptr);
 				if (SkelMesh->GetResourceForRendering())
 				{
@@ -426,12 +479,42 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 		}
 
 		ExpectedSkeleton = FoundSkeleton;
+
+		if (FoundSkeleton)
+		{
+			const SekiroHumanoidValidation::FVisiblePoseValidationResult PoseValidation =
+				SekiroHumanoidValidation::ValidateImportedVisibleHumanoidPose(FoundSkeleton, FoundSkeletalMesh);
+			V.bVisiblePoseValidated = PoseValidation.bValidated;
+			V.VisiblePoseErrors = PoseValidation.Errors.Num();
+			for (const FString& Error : PoseValidation.Errors)
+			{
+				UE_LOG(LogTemp, Error, TEXT("Validation: %s: %s"), *ChrId, *Error);
+			}
+		}
 	}
 
 	// 2. Validate AnimSequences
 	{
+		TSet<FString> ExpectedAnimationNames;
+		TSharedPtr<FJsonObject> AssetPackageRoot;
+		const FString AssetPackagePath = ExportDir / ChrId / TEXT("asset_package.json");
+		if (LoadValidationJsonObjectFromFile(AssetPackagePath, AssetPackageRoot))
+		{
+			TArray<FString> ExpectedAnimationFiles;
+			if (GetStringArrayField(AssetPackageRoot, TEXT("expectedAnimationFiles"), ExpectedAnimationFiles))
+			{
+				for (const FString& ExpectedAnimationFile : ExpectedAnimationFiles)
+				{
+					ExpectedAnimationNames.Add(FPaths::GetBaseFilename(ExpectedAnimationFile));
+				}
+			}
+
+			V.ExpectedAnimationCount = ExpectedAnimationNames.Num();
+		}
+
 		TArray<FAssetData> AnimAssets;
 		AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Animations"))), AnimAssets, true);
+		TSet<FString> ImportedAnimationNames;
 
 		for (const FAssetData& AssetData : AnimAssets)
 		{
@@ -439,6 +522,7 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 			if (!AnimSeq) continue;
 
 			V.AnimSequenceCount++;
+			ImportedAnimationNames.Add(AnimSeq->GetName());
 
 			float Duration = AnimSeq->GetPlayLength();
 			V.TotalAnimDuration += Duration;
@@ -463,6 +547,15 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 			USkeleton* AnimSkeleton = AnimSeq->GetSkeleton();
 			if (!AnimSkeleton || (V.bHasSkeleton && ExpectedSkeleton && AnimSkeleton != ExpectedSkeleton))
 				V.AnimsWithWrongSkeleton++;
+		}
+
+		for (const FString& ExpectedAnimationName : ExpectedAnimationNames)
+		{
+			if (!ImportedAnimationNames.Contains(ExpectedAnimationName))
+			{
+				V.MissingExpectedAnimationAssets++;
+				UE_LOG(LogTemp, Error, TEXT("Validation: %s: expected animation '%s' is missing after import"), *ChrId, *ExpectedAnimationName);
+			}
 		}
 	}
 
@@ -618,6 +711,73 @@ USekiroValidationCommandlet::FCharacterValidation USekiroValidationCommandlet::V
 		else if (FPaths::FileExists(SkillJsonPath))
 		{
 			ValidateSkillConfig(ChrId, SkillJsonPath, ChrContent, V);
+		}
+	}
+
+	// 6. Semantic-level checks (Task 5.4)
+	{
+		// 6a. Master Material validation
+		const FString FormalMasterMaterialPath = TEXT("/Game/SekiroAssets/Materials/M_SekiroMaster.M_SekiroMaster");
+		UMaterial* MasterMaterial = Cast<UMaterial>(StaticLoadObject(UMaterial::StaticClass(), nullptr, *FormalMasterMaterialPath));
+		V.bMasterMaterialExists = (MasterMaterial != nullptr);
+
+		if (V.bMasterMaterialExists)
+		{
+			// Verify all material instances under this character use the formal Master Material as parent
+			TArray<FAssetData> MatAssets;
+			AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Materials"))), MatAssets, true);
+			for (const FAssetData& AssetData : MatAssets)
+			{
+				UMaterialInstanceConstant* MatInst = Cast<UMaterialInstanceConstant>(AssetData.GetAsset());
+				if (!MatInst) continue;
+
+				UMaterialInterface* Parent = MatInst->Parent;
+				if (Parent != MasterMaterial)
+				{
+					V.MaterialsWithWrongParent++;
+					UE_LOG(LogTemp, Error, TEXT("Validation: %s: material '%s' parent is '%s', expected formal M_SekiroMaster"),
+						*ChrId, *MatInst->GetName(), Parent ? *Parent->GetName() : TEXT("null"));
+				}
+			}
+		}
+
+		// 6b. Root-motion consistency: check imported animations have root-motion enabled
+		if (ExpectedSkeleton)
+		{
+			TArray<FAssetData> AnimAssets;
+			AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Animations"))), AnimAssets, true);
+			for (const FAssetData& AssetData : AnimAssets)
+			{
+				UAnimSequence* Anim = Cast<UAnimSequence>(AssetData.GetAsset());
+				if (!Anim) continue;
+				if (!Anim->bEnableRootMotion)
+				{
+					V.AnimsWithoutRootMotion++;
+				}
+			}
+		}
+
+		// 6c. Skill data assets: verify each has a valid animation reference
+		{
+			TArray<FAssetData> SkillAssets;
+			AssetRegistry.GetAssetsByPath(FName(*(ChrContent / TEXT("Skills"))), SkillAssets, true);
+			for (const FAssetData& AssetData : SkillAssets)
+			{
+				USekiroSkillDataAsset* SkillAsset = Cast<USekiroSkillDataAsset>(AssetData.GetAsset());
+				if (!SkillAsset) continue;
+				if (SkillAsset->Animation.IsNull())
+				{
+					V.SkillAssetsWithoutAnimation++;
+				}
+			}
+		}
+
+		// 6d. CharacterData asset exists
+		{
+			const FString CharacterAssetName = FString::Printf(TEXT("CHR_%s"), *ChrId);
+			const FString CharacterAssetPath = FString::Printf(TEXT("%s/%s.%s"), *ChrContent, *CharacterAssetName, *CharacterAssetName);
+			UObject* CharAsset = StaticLoadObject(UObject::StaticClass(), nullptr, *CharacterAssetPath);
+			V.bHasCharacterDataAsset = (CharAsset != nullptr);
 		}
 	}
 

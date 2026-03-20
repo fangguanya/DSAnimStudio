@@ -3,6 +3,8 @@
 #include "Editor/SekiroSkillAssetEditor.h"
 
 #include "Data/SekiroSkillDataAsset.h"
+#include "Data/SekiroCharacterData.h"
+#include "Import/SekiroAssetImporter.h"
 #include "UI/SSekiroEventInspector.h"
 #include "UI/SSekiroSkillPreviewViewport.h"
 #include "UI/SSekiroSkillTimeline.h"
@@ -231,11 +233,47 @@ void FSekiroSkillAssetEditor::RefreshSkillData()
 	if (Inspector.IsValid())
 	{
 		Inspector->ClearEvent();
+		Inspector->SetSkillData(SkillAsset);
+		if (SkillAsset)
+		{
+			USekiroCharacterData* CharData = SkillAsset->CharacterData.LoadSynchronous();
+			Inspector->SetCharacterData(CharData);
+		}
+		else
+		{
+			Inspector->SetCharacterData(nullptr);
+		}
 	}
 
 	if (DetailsView.IsValid())
 	{
 		DetailsView->SetObject(SkillAsset);
+	}
+}
+
+void FSekiroSkillAssetEditor::SaveAsset_Execute()
+{
+	// Save the UAsset via the standard pipeline
+	FAssetEditorToolkit::SaveAsset_Execute();
+
+	// Additionally write back to skill_config.json so the JSON source stays in sync
+	if (SkillAsset)
+	{
+		USekiroCharacterData* CharData = SkillAsset->CharacterData.LoadSynchronous();
+		if (CharData)
+		{
+			TArray<USekiroSkillDataAsset*> AllSkills;
+			for (const TSoftObjectPtr<USekiroSkillDataAsset>& SkillRef : CharData->Skills)
+			{
+				if (USekiroSkillDataAsset* Skill = SkillRef.LoadSynchronous())
+				{
+					AllSkills.Add(Skill);
+				}
+			}
+
+			const FString SkillConfigPath = FPaths::ProjectContentDir() / TEXT("SekiroAssets/Characters") / CharData->CharacterId / TEXT("Skills/skill_config.json");
+			USekiroAssetImporter::WriteBackSkillConfig(AllSkills, SkillConfigPath);
+		}
 	}
 }
 

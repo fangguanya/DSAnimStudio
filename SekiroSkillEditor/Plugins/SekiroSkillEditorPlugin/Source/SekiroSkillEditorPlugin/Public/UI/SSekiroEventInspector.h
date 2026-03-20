@@ -7,11 +7,15 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Data/SekiroTaeEvent.h"
 
+class USekiroCharacterData;
+class USekiroSkillDataAsset;
+
 /**
  * Inspector panel that displays the details of a selected FSekiroTaeEvent.
  *
  * Shows: Type, TypeName, Category, Frame Range, and all Parameters
- * in a scrollable vertical list.
+ * in a scrollable vertical list. When CharacterData is set, resolves
+ * DummyPoly references, parameter chains, and root-motion results.
  */
 class SEKIROSKILLEDITORPLUGIN_API SSekiroEventInspector : public SCompoundWidget
 {
@@ -28,12 +32,27 @@ public:
 	/** Clear the inspector. */
 	void ClearEvent();
 
+	/** Set the character data for semantic resolution of DummyPoly and parameter chains. */
+	void SetCharacterData(USekiroCharacterData* InCharacterData);
+
+	/** Set the skill data for root-motion resolution. */
+	void SetSkillData(USekiroSkillDataAsset* InSkillData);
+
 private:
 	/** Rebuild all child widgets from the current event data. */
 	void RebuildContent();
 
 	/** Helper: create a label + value row. */
 	TSharedRef<SWidget> MakePropertyRow(const FString& Label, const FString& Value, bool bAlternateColor) const;
+
+	/** Helper: build resolved DummyPoly section. */
+	void BuildResolvedDummyPolySection(const FSekiroTaeEvent& Evt, int32& RowIndex);
+
+	/** Helper: build resolved parameter chain section. */
+	void BuildResolvedParamChainSection(const FSekiroTaeEvent& Evt, int32& RowIndex);
+
+	/** Helper: build root-motion section. */
+	void BuildRootMotionSection(const FSekiroTaeEvent& Evt, int32& RowIndex);
 
 	/** The currently inspected event (may be empty). */
 	TOptional<FSekiroTaeEvent> CurrentEvent;
@@ -43,6 +62,12 @@ private:
 
 	/** The scroll box wrapping ContentBox. */
 	TSharedPtr<SScrollBox> ScrollBox;
+
+	/** Character data for semantic resolution. */
+	TWeakObjectPtr<USekiroCharacterData> CharacterData;
+
+	/** Skill data for root-motion resolution. */
+	TWeakObjectPtr<USekiroSkillDataAsset> SkillData;
 
 	/** Whether an event is loaded. */
 	bool bHasEvent = false;

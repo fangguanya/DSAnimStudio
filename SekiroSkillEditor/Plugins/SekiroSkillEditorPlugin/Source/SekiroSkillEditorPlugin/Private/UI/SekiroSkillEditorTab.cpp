@@ -6,6 +6,7 @@
 #include "UI/SSekiroEventInspector.h"
 #include "UI/SSekiroSkillBrowser.h"
 #include "Data/SekiroSkillDataAsset.h"
+#include "Data/SekiroCharacterData.h"
 #include "Data/SekiroTaeEvent.h"
 
 #include "Framework/Docking/TabManager.h"
@@ -19,6 +20,8 @@
 #include "Styling/CoreStyle.h"
 #include "Styling/AppStyle.h"
 #include "Textures/SlateIcon.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Editor.h"
 
 // ---------------------------------------------------------------------------
 // Statics
@@ -69,7 +72,8 @@ TSharedRef<SDockTab> FSekiroSkillEditorTab::SpawnTab(const FSpawnTabArgs& SpawnT
 	// ---- Build child widgets ----
 
 	SAssignNew(Browser, SSekiroSkillBrowser)
-		.OnSkillSelected_Static(&FSekiroSkillEditorTab::OnSkillSelected);
+		.OnSkillSelected_Static(&FSekiroSkillEditorTab::OnSkillSelected)
+		.OnSkillDoubleClicked_Static(&FSekiroSkillEditorTab::OnSkillDoubleClicked);
 
 	SAssignNew(Inspector, SSekiroEventInspector);
 
@@ -154,10 +158,20 @@ void FSekiroSkillEditorTab::OnSkillSelected(USekiroSkillDataAsset* InSkillData)
 		PreviewViewport->SetCurrentFrame(0.0f);
 	}
 
-	// Clear the inspector when switching skills
+	// Pass character and skill data to the inspector for semantic resolution
 	if (Inspector.IsValid())
 	{
 		Inspector->ClearEvent();
+		Inspector->SetSkillData(InSkillData);
+		if (InSkillData)
+		{
+			USekiroCharacterData* CharData = InSkillData->CharacterData.LoadSynchronous();
+			Inspector->SetCharacterData(CharData);
+		}
+		else
+		{
+			Inspector->SetCharacterData(nullptr);
+		}
 	}
 }
 
@@ -174,5 +188,23 @@ void FSekiroSkillEditorTab::OnFrameScrubbed(float InFrame)
 	if (PreviewViewport.IsValid())
 	{
 		PreviewViewport->SetCurrentFrame(InFrame);
+	}
+}
+
+void FSekiroSkillEditorTab::OnSkillDoubleClicked(USekiroSkillDataAsset* InSkillData)
+{
+	if (!InSkillData)
+	{
+		return;
+	}
+
+	// Open the dedicated asset editor for the double-clicked skill
+	if (GEditor)
+	{
+		UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+		if (AssetEditorSubsystem)
+		{
+			AssetEditorSubsystem->OpenEditorForAsset(InSkillData);
+		}
 	}
 }

@@ -293,12 +293,16 @@ int32 SSekiroSkillTimeline::OnPaint(
 			const float BarLeft  = FMath::Max(FrameToPixel(Evt.StartFrame), LabelWidth);
 			const float BarRight = FMath::Min(FrameToPixel(Evt.EndFrame), LocalSize.X);
 
-			if (BarRight <= BarLeft)
+			// Point events (StartFrame == EndFrame): draw a minimum-width marker
+			const bool bIsPointEvent = FMath::Abs(Evt.EndFrame - Evt.StartFrame) < 0.01f;
+			const float EffectiveRight = bIsPointEvent ? FMath::Max(BarLeft + 6.0f, BarRight) : BarRight;
+
+			if (EffectiveRight <= BarLeft)
 			{
 				continue;
 			}
 
-			const float BarWidth = BarRight - BarLeft;
+			const float BarWidth = EffectiveRight - BarLeft;
 			const float BarTop   = TrackTop + 2.0f;
 			const float BarH     = TrackHeight - 4.0f;
 
@@ -315,13 +319,31 @@ int32 SSekiroSkillTimeline::OnPaint(
 			// Event type label inside bar (if bar is wide enough)
 			if (BarWidth > 30.0f)
 			{
+				// Show type name + key semantic info for wider bars
+				FString BarLabel = Evt.TypeName;
+
+				// For Attack events, append behaviorJudgeId if present
+				if (BarWidth > 80.0f)
+				{
+					const FString* BhvId = Evt.Parameters.Find(TEXT("behaviorJudgeId"));
+					if (BhvId)
+					{
+						BarLabel += FString::Printf(TEXT(" [bhv:%s]"), **BhvId);
+					}
+					const FString* AtkId = Evt.Parameters.Find(TEXT("atkId"));
+					if (AtkId)
+					{
+						BarLabel += FString::Printf(TEXT(" atk:%s"), **AtkId);
+					}
+				}
+
 				FSlateDrawElement::MakeText(
 					OutDrawElements,
 					LayerId + 2,
 					AllottedGeometry.ToPaintGeometry(
 						FVector2D(BarWidth - 4.0f, BarH),
 						FSlateLayoutTransform(FVector2D(BarLeft + 2.0f, BarTop + 1.0f))),
-					Evt.TypeName,
+					BarLabel,
 					SmallFont,
 					DrawEffects,
 					FLinearColor::Black);

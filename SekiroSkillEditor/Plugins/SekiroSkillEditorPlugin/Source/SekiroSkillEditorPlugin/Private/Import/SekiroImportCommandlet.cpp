@@ -23,7 +23,9 @@
 #include "Misc/Paths.h"
 #include "Misc/PackageName.h"
 #include "Misc/FileHelper.h"
+#include "EditorAssetLibrary.h"
 #include "Import/SekiroAssetImporter.h"
+#include "Import/SekiroHumanoidValidation.h"
 #include "Import/SekiroMaterialSetup.h"
 #include "Data/SekiroCharacterData.h"
 #include "Data/SekiroSkillDataAsset.h"
@@ -100,107 +102,149 @@ namespace
 		return FTransform(FQuat(FVector::YAxisVector, PI), FVector::ZeroVector, FVector(-1.0, 1.0, 1.0));
 	}
 
-	static FMatrix MakeGltfToUeBasisMatrix()
+	static bool DeleteAssetDirectoryIfPresent(const FString& DirectoryPath)
 	{
-		FMatrix Basis = FMatrix::Identity;
-		const FVector XAxis(0.0, 0.0, -1.0);
-		const FVector YAxis(-1.0, 0.0, 0.0);
-		const FVector ZAxis(0.0, -1.0, 0.0);
-		const FVector Origin = FVector::ZeroVector;
-		Basis.SetAxes(&XAxis, &YAxis, &ZAxis, &Origin);
-		return Basis;
-	}
-
-	static FVector MapGltfVectorToUeBasis(const FVector& InVector)
-	{
-		return InVector;
-	}
-
-	static FQuat MapGltfRotationToUeBasis(const FQuat& InQuat)
-	{
-		return InQuat;
-	}
-
-	static FTransform ConvertGltfLocalTransformToUeBasis(const FTransform& InTransform)
-	{
-		return FTransform(
-			InTransform.GetRotation(),
-			InTransform.GetTranslation() * GltfToUeLengthScale,
-			InTransform.GetScale3D());
-	}
-
-	static void ApplyImportedRootOrientationCorrection(USkeleton* Skeleton, USkeletalMesh* SkeletalMesh)
-	{
-		const FTransform RootCorrection = GetImportedRootOrientationCorrection();
-
-		if (Skeleton)
+		if (!UEditorAssetLibrary::DoesDirectoryExist(DirectoryPath))
 		{
-			FReferenceSkeleton& SkeletonRef = const_cast<FReferenceSkeleton&>(Skeleton->GetReferenceSkeleton());
-			if (SkeletonRef.GetNum() > 0)
+			return true;
+		}
+
+		const bool bDeleted = UEditorAssetLibrary::DeleteDirectory(DirectoryPath);
+		UE_LOG(LogTemp, Display, TEXT("    DeleteDirectory %s -> %s"), *DirectoryPath, bDeleted ? TEXT("success") : TEXT("failed"));
+		return bDeleted;
+	}
+
+	static bool TryGetPureSpineOrdinal(const FName& BoneName, int32& OutOrdinal)
+	{
+		const FString Name = BoneName.ToString();
+		if (Name.Equals(TEXT("Spine"), ESearchCase::IgnoreCase))
+		{
+			OutOrdinal = 0;
+			return true;
+		}
+
+		if (!Name.StartsWith(TEXT("Spine"), ESearchCase::IgnoreCase))
+		{
+			return false;
+		}
+
+		const FString Suffix = Name.Mid(5);
+		if (Suffix.IsEmpty())
+		{
+			return false;
+		}
+
+		for (const TCHAR Ch : Suffix)
+		{
+			if (!FChar::IsDigit(Ch))
 			{
-				FReferenceSkeletonModifier Modifier(SkeletonRef, Skeleton);
-				const FTransform RootPose = SkeletonRef.GetRefBonePose()[0];
-				Modifier.UpdateRefPoseTransform(0, RootPose * RootCorrection);
-				Skeleton->MarkPackageDirty();
+				return false;
 			}
 		}
 
-		if (SkeletalMesh)
+		OutOrdinal = FCString::Atoi(*Suffix);
+		return true;
+	}
+
+	static int32 FindExactBoneIndex(const FReferenceSkeleton& RefSkeleton, const TCHAR* BoneName)
+	{
+		return RefSkeleton.FindBoneIndex(FName(BoneName));
+	}
+
+	static void AddBoneIfPresent(const FReferenceSkeleton& RefSkeleton, const TCHAR* BoneName, TArray<int32>& Chain)
+	{
+		const int32 BoneIndex = FindExactBoneIndex(RefSkeleton, BoneName);
+		if (BoneIndex != INDEX_NONE && !Chain.Contains(BoneIndex))
 		{
-			FReferenceSkeleton& MeshRef = const_cast<FReferenceSkeleton&>(SkeletalMesh->GetRefSkeleton());
-			if (MeshRef.GetNum() > 0)
+			Chain.Add(BoneIndex);
+		}
+	}
+
+	static TArray<int32> BuildImportedTorsoChain(const FReferenceSkeleton& RefSkeleton)
+	{
+		TArray<TPair<int32, int32>> PureSpines;
+		PureSpines.Reserve(8);
+
+		for (int32 BoneIndex = 0; BoneIndex < RefSkeleton.GetNum(); ++BoneIndex)
+		{
+			int32 Ordinal = -1;
+			if (TryGetPureSpineOrdinal(RefSkeleton.GetBoneName(BoneIndex), Ordinal))
 			{
-				FReferenceSkeletonModifier Modifier(MeshRef, Skeleton);
-				const FTransform RootPose = MeshRef.GetRefBonePose()[0];
-				Modifier.UpdateRefPoseTransform(0, RootPose * RootCorrection);
-				SkeletalMesh->CalculateInvRefMatrices();
-				SkeletalMesh->MarkPackageDirty();
+				PureSpines.Emplace(Ordinal, BoneIndex);
 			}
 		}
+
+		PureSpines.Sort([](const TPair<int32, int32>& Left, const TPair<int32, int32>& Right)
+		{
+			return Left.Key < Right.Key;
+		});
+
+		TArray<int32> Chain;
+		Chain.Reserve(PureSpines.Num() + 4);
+		for (const TPair<int32, int32>& Entry : PureSpines)
+		{
+			Chain.Add(Entry.Value);
+		}
+
+		AddBoneIfPresent(RefSkeleton, TEXT("Chest"), Chain);
+		AddBoneIfPresent(RefSkeleton, TEXT("UpperChest"), Chain);
+		AddBoneIfPresent(RefSkeleton, TEXT("Neck"), Chain);
+		AddBoneIfPresent(RefSkeleton, TEXT("Head"), Chain);
+		return Chain;
 	}
 
-	static FTransform ParseGltfNodeLocalTransform(const TSharedPtr<FJsonObject>& NodeObject)
+	static void ValidateImportedHumanoidTorsoChain(USkeleton* Skeleton, TArray<FString>& Errors)
 	{
-		if (!NodeObject.IsValid())
-			return FTransform::Identity;
-
-		const TArray<TSharedPtr<FJsonValue>>* MatrixArray = nullptr;
-		if (NodeObject->TryGetArrayField(TEXT("matrix"), MatrixArray) && MatrixArray && MatrixArray->Num() == 16)
+		if (!Skeleton)
 		{
-			const FVector XAxis((*MatrixArray)[0]->AsNumber(), (*MatrixArray)[1]->AsNumber(), (*MatrixArray)[2]->AsNumber());
-			const FVector YAxis((*MatrixArray)[4]->AsNumber(), (*MatrixArray)[5]->AsNumber(), (*MatrixArray)[6]->AsNumber());
-			const FVector ZAxis((*MatrixArray)[8]->AsNumber(), (*MatrixArray)[9]->AsNumber(), (*MatrixArray)[10]->AsNumber());
-			const FVector Origin((*MatrixArray)[12]->AsNumber(), (*MatrixArray)[13]->AsNumber(), (*MatrixArray)[14]->AsNumber());
-
-			FMatrix Matrix = FMatrix::Identity;
-			Matrix.SetAxes(&XAxis, &YAxis, &ZAxis, &Origin);
-			return FTransform(Matrix);
+			Errors.Add(TEXT("imported skeleton missing after model import"));
+			return;
 		}
 
-		FVector Translation = FVector::ZeroVector;
-		const TArray<TSharedPtr<FJsonValue>>* TranslationArray = nullptr;
-		if (NodeObject->TryGetArrayField(TEXT("translation"), TranslationArray) && TranslationArray && TranslationArray->Num() == 3)
+		const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
+		const int32 PelvisIndex = FindExactBoneIndex(RefSkeleton, TEXT("Pelvis"));
+		if (PelvisIndex == INDEX_NONE)
 		{
-			Translation = FVector((*TranslationArray)[0]->AsNumber(), (*TranslationArray)[1]->AsNumber(), (*TranslationArray)[2]->AsNumber());
+			Errors.Add(TEXT("imported skeleton is missing required bone 'Pelvis'"));
+			return;
 		}
 
-		FQuat Rotation = FQuat::Identity;
-		const TArray<TSharedPtr<FJsonValue>>* RotationArray = nullptr;
-		if (NodeObject->TryGetArrayField(TEXT("rotation"), RotationArray) && RotationArray && RotationArray->Num() == 4)
+		TArray<int32> Chain = BuildImportedTorsoChain(RefSkeleton);
+		if (Chain.Num() < 5)
 		{
-			Rotation = FQuat((*RotationArray)[0]->AsNumber(), (*RotationArray)[1]->AsNumber(), (*RotationArray)[2]->AsNumber(), (*RotationArray)[3]->AsNumber());
-			Rotation.Normalize();
+			Errors.Add(FString::Printf(TEXT("imported skeleton torso chain is incomplete under '%s'"), *Skeleton->GetPathName()));
+			return;
 		}
 
-		FVector Scale = FVector::OneVector;
-		const TArray<TSharedPtr<FJsonValue>>* ScaleArray = nullptr;
-		if (NodeObject->TryGetArrayField(TEXT("scale"), ScaleArray) && ScaleArray && ScaleArray->Num() == 3)
+		TArray<FString> ChainNames;
+		ChainNames.Reserve(Chain.Num() + 1);
+		ChainNames.Add(RefSkeleton.GetBoneName(PelvisIndex).ToString());
+		for (const int32 BoneIndex : Chain)
 		{
-			Scale = FVector((*ScaleArray)[0]->AsNumber(), (*ScaleArray)[1]->AsNumber(), (*ScaleArray)[2]->AsNumber());
+			ChainNames.Add(RefSkeleton.GetBoneName(BoneIndex).ToString());
 		}
+		UE_LOG(LogTemp, Display, TEXT("  Imported torso chain: %s"), *FString::Join(ChainNames, TEXT(" -> ")));
 
-		return FTransform(Rotation, Translation, Scale);
+		int32 ExpectedParentIndex = PelvisIndex;
+		for (const int32 BoneIndex : Chain)
+		{
+			const int32 ActualParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
+			if (ActualParentIndex != ExpectedParentIndex)
+			{
+				const FString BoneName = RefSkeleton.GetBoneName(BoneIndex).ToString();
+				const FString ExpectedParentName = RefSkeleton.GetBoneName(ExpectedParentIndex).ToString();
+				const FString ActualParentName = ActualParentIndex != INDEX_NONE
+					? RefSkeleton.GetBoneName(ActualParentIndex).ToString()
+					: TEXT("<none>");
+				Errors.Add(FString::Printf(TEXT("imported skeleton torso hierarchy mismatch: '%s' must be parented directly under '%s' but was under '%s'"), *BoneName, *ExpectedParentName, *ActualParentName));
+				return;
+			}
+
+			ExpectedParentIndex = BoneIndex;
+		}
 	}
+
+	static bool LoadJsonObjectFromFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject);
 
 	static bool LoadJsonObjectFromFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject)
 	{
@@ -252,6 +296,32 @@ namespace
 			OutFiles.Add(FPaths::ConvertRelativePathToFull(ExportDir / RelativePath));
 		}
 		return OutFiles.Num() > 0;
+	}
+
+	static bool ResolveStringArrayField(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName, TArray<FString>& OutValues)
+	{
+		OutValues.Reset();
+		if (!JsonObject.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ValuesArray = nullptr;
+		if (!JsonObject->TryGetArrayField(FieldName, ValuesArray) || !ValuesArray)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Value : *ValuesArray)
+		{
+			const FString StringValue = Value.IsValid() ? Value->AsString() : FString();
+			if (!StringValue.IsEmpty())
+			{
+				OutValues.Add(StringValue);
+			}
+		}
+
+		return OutValues.Num() > 0;
 	}
 
 	static USekiroCharacterData* LoadCharacterDataAsset(const FString& ChrContent, const FString& ChrId)
@@ -466,6 +536,8 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	FString ChrContent = ContentBase / ChrId;
 	int32 TexCount = 0, AnimCount = 0;
 	TArray<FString> Errors;
+	bool bVisiblePoseValidated = false;
+	USkeletalMesh* ImportedSkeletalMesh = nullptr;
 
 	TSharedPtr<FJsonObject> AssetPackage;
 	const FString AssetPackagePath = ExportDir / TEXT("asset_package.json");
@@ -478,6 +550,8 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	TArray<FString> TextureFiles;
 	TArray<FString> ModelFiles;
 	TArray<FString> AnimationFiles;
+	TArray<FString> ExpectedAnimationFiles;
+	TArray<FString> MissingAnimationFiles;
 	TArray<FString> MaterialManifestFiles;
 	TArray<FString> SkillFiles;
 	const bool bFormalOnly = AssetPackage->GetStringField(TEXT("deliveryMode")) == TEXT("formal-only");
@@ -485,6 +559,8 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	const bool bHasTextures = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("textures"), TextureFiles);
 	const bool bHasModel = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("model"), ModelFiles);
 	const bool bHasAnimations = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("animations"), AnimationFiles);
+	ResolveStringArrayField(AssetPackage, TEXT("expectedAnimationFiles"), ExpectedAnimationFiles);
+	ResolveStringArrayField(AssetPackage, TEXT("missingAnimationFiles"), MissingAnimationFiles);
 	const bool bHasMaterialManifest = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("materialManifest"), MaterialManifestFiles);
 	const bool bHasSkills = ResolveDeliverableFiles(AssetPackage, ExportDir, TEXT("skills"), SkillFiles);
 
@@ -526,11 +602,29 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	if (AnimFilters.Num() > 0)
 	{
 		const int32 OriginalAnimationCount = AnimationFiles.Num();
+		const int32 OriginalExpectedAnimationCount = ExpectedAnimationFiles.Num();
+		const int32 OriginalMissingAnimationCount = MissingAnimationFiles.Num();
 		AnimationFiles = AnimationFiles.FilterByPredicate([&AnimFilters](const FString& AnimFile)
 		{
 			return MatchesAnimationFilter(FPaths::GetBaseFilename(AnimFile), AnimFilters);
 		});
+		ExpectedAnimationFiles = ExpectedAnimationFiles.FilterByPredicate([&AnimFilters](const FString& AnimFile)
+		{
+			return MatchesAnimationFilter(FPaths::GetBaseFilename(AnimFile), AnimFilters);
+		});
+		MissingAnimationFiles = MissingAnimationFiles.FilterByPredicate([&AnimFilters](const FString& AnimFile)
+		{
+			return MatchesAnimationFilter(FPaths::GetBaseFilename(AnimFile), AnimFilters);
+		});
 		UE_LOG(LogTemp, Display, TEXT("  AnimFilter: %d -> %d clips"), OriginalAnimationCount, AnimationFiles.Num());
+		if (OriginalExpectedAnimationCount > 0)
+		{
+			UE_LOG(LogTemp, Display, TEXT("  ExpectedAnimFilter: %d -> %d clips"), OriginalExpectedAnimationCount, ExpectedAnimationFiles.Num());
+		}
+		if (OriginalMissingAnimationCount > 0)
+		{
+			UE_LOG(LogTemp, Display, TEXT("  MissingAnimFilter: %d -> %d clips"), OriginalMissingAnimationCount, MissingAnimationFiles.Num());
+		}
 	}
 
 	if (AnimLimit > 0 && AnimationFiles.Num() > AnimLimit)
@@ -538,8 +632,23 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		AnimationFiles.SetNum(AnimLimit);
 		UE_LOG(LogTemp, Display, TEXT("  AnimLimit=%d: truncating to first %d animations"), AnimLimit, AnimLimit);
 	}
+	if (AnimLimit > 0 && ExpectedAnimationFiles.Num() > AnimLimit)
+	{
+		ExpectedAnimationFiles.SetNum(AnimLimit);
+	}
+	if (AnimLimit > 0 && MissingAnimationFiles.Num() > AnimLimit)
+	{
+		MissingAnimationFiles.SetNum(AnimLimit);
+	}
 
-	const int32 ExpectedAnimationCount = AnimationFiles.Num();
+	const int32 ExpectedAnimationCount = ExpectedAnimationFiles.Num() > 0 ? ExpectedAnimationFiles.Num() : AnimationFiles.Num();
+	if (!bImportModelOnly && MissingAnimationFiles.Num() > 0)
+	{
+		for (const FString& MissingAnimationFile : MissingAnimationFiles)
+		{
+			Errors.Add(FString::Printf(TEXT("formal export missing expected animation deliverable: %s"), *FPaths::GetCleanFilename(MissingAnimationFile)));
+		}
+	}
 
 	// 1. Import textures (PNG only)
 	if (!bImportAnimationsOnly)
@@ -563,8 +672,9 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 
 	// 2. Import model from formal asset package
 	FString ModelFile = bHasModel ? ModelFiles[0] : TEXT("");
+	const FString MeshContentPath = ChrContent / TEXT("Mesh");
 
-	USkeleton* Skeleton = FindSkeletonInPackage(ChrContent / TEXT("Mesh"));
+	USkeleton* Skeleton = FindSkeletonInPackage(MeshContentPath);
 	if (!bImportModelOnly && Skeleton)
 	{
 		UE_LOG(LogTemp, Display, TEXT("  Existing skeleton: %s"), *Skeleton->GetPathName());
@@ -573,13 +683,19 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	if (!ModelFile.IsEmpty() && (!bImportAnimationsOnly || !Skeleton))
 	{
 		FString Extension = FPaths::GetExtension(ModelFile).ToLower();
+		const FString ImportedModelRootPath = MeshContentPath / FPaths::GetBaseFilename(ModelFile);
 		UE_LOG(LogTemp, Display, TEXT("  Importing model: %s (format: %s)"), *FPaths::GetCleanFilename(ModelFile), *Extension);
+
+		if (!DeleteAssetDirectoryIfPresent(ImportedModelRootPath))
+		{
+			Errors.Add(FString::Printf(TEXT("failed to clear existing mesh asset directory: %s"), *ImportedModelRootPath));
+		}
 
 		UObject* Result = nullptr;
 
 		if (Extension == TEXT("gltf") || Extension == TEXT("glb"))
 		{
-			Result = ImportViaAssetTask(ModelFile, ChrContent / TEXT("Mesh"), nullptr, true);
+			Result = ImportViaAssetTask(ModelFile, MeshContentPath, nullptr, true);
 		}
 		else
 		{
@@ -593,25 +709,42 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			if (SkelMesh)
 			{
 				UE_LOG(LogTemp, Display, TEXT("  Model: OK (SkeletalMesh)"));
+				ImportedSkeletalMesh = SkelMesh;
 				Skeleton = SkelMesh->GetSkeleton();
 				SavePackage(SkelMesh);
 				if (Skeleton)
 					SavePackage(Skeleton);
 				if (Skeleton)
 					UE_LOG(LogTemp, Display, TEXT("  Skeleton: %s"), *Skeleton->GetPathName());
+				ValidateImportedHumanoidTorsoChain(Skeleton, Errors);
+				const SekiroHumanoidValidation::FVisiblePoseValidationResult PoseValidation =
+					SekiroHumanoidValidation::ValidateImportedVisibleHumanoidPose(Skeleton, SkelMesh);
+				bVisiblePoseValidated = PoseValidation.bValidated;
+				Errors.Append(PoseValidation.Errors);
 			}
 			else
 			{
 				UE_LOG(LogTemp, Display, TEXT("  Model: OK (%s) - checking for skeleton..."),
 					*Result->GetClass()->GetName());
 
-				Skeleton = FindSkeletonInPackage(ChrContent / TEXT("Mesh"));
+				USkeletalMesh* ImportedSkelMesh = FindSkeletalMeshInPackage(MeshContentPath);
+				ImportedSkeletalMesh = ImportedSkelMesh;
+				Skeleton = FindSkeletonInPackage(MeshContentPath);
+				if (ImportedSkelMesh)
+				{
+					SavePackage(ImportedSkelMesh);
+				}
 				if (Skeleton)
 				{
 					SavePackage(Skeleton);
 				}
 				if (Skeleton)
 					UE_LOG(LogTemp, Display, TEXT("  Skeleton found: %s"), *Skeleton->GetPathName());
+				ValidateImportedHumanoidTorsoChain(Skeleton, Errors);
+				const SekiroHumanoidValidation::FVisiblePoseValidationResult PoseValidation =
+					SekiroHumanoidValidation::ValidateImportedVisibleHumanoidPose(Skeleton, ImportedSkelMesh);
+				bVisiblePoseValidated = PoseValidation.bValidated;
+				Errors.Append(PoseValidation.Errors);
 			}
 		}
 		else
@@ -626,7 +759,9 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	}
 
 	// 3. Import animations via Interchange (same pipeline as model)
-	if (Skeleton)
+	int32 RootMotionEnabledCount = 0;
+	TArray<FString> RootMotionFailedClips;
+	if (!bImportModelOnly && Skeleton)
 	{
 		for (const FString& AnimFile : AnimationFiles)
 		{
@@ -647,6 +782,20 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 			if (Result)
 			{
 				AnimCount++;
+
+				// Enable root-motion on the imported animation
+				if (UAnimSequence* AnimSeq = Cast<UAnimSequence>(Result))
+				{
+					AnimSeq->bEnableRootMotion = true;
+					AnimSeq->bForceRootLock = false;
+					AnimSeq->MarkPackageDirty();
+					SavePackage(AnimSeq);
+					RootMotionEnabledCount++;
+				}
+				else
+				{
+					RootMotionFailedClips.Add(AnimName);
+				}
 			}
 			else
 			{
@@ -655,11 +804,19 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		}
 
 		if (bHasAnimations)
-			UE_LOG(LogTemp, Display, TEXT("  Animations: %d"), AnimCount);
+			UE_LOG(LogTemp, Display, TEXT("  Animations: %d (root-motion enabled: %d)"), AnimCount, RootMotionEnabledCount);
 
 		if (bHasAnimations && AnimCount != ExpectedAnimationCount)
 		{
 			Errors.Add(FString::Printf(TEXT("animation coverage mismatch: imported %d of %d expected clips"), AnimCount, ExpectedAnimationCount));
+		}
+
+		if (RootMotionFailedClips.Num() > 0)
+		{
+			for (const FString& Clip : RootMotionFailedClips)
+			{
+				Errors.Add(FString::Printf(TEXT("root-motion enablement failed for clip: %s"), *Clip));
+			}
 		}
 
 		if (AnimCount > 30)
@@ -752,14 +909,48 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	}
 
 	TSharedPtr<FJsonObject> ReportObject = MakeShared<FJsonObject>();
-	ReportObject->SetStringField(TEXT("schemaVersion"), TEXT("1.0"));
+	ReportObject->SetStringField(TEXT("schemaVersion"), TEXT("2.0"));
 	ReportObject->SetStringField(TEXT("characterId"), ChrId);
 	ReportObject->SetStringField(TEXT("deliveryMode"), TEXT("formal-only"));
 	ReportObject->SetBoolField(TEXT("modelImported"), !ModelFile.IsEmpty() && Skeleton != nullptr);
 	ReportObject->SetBoolField(TEXT("skeletonImported"), Skeleton != nullptr);
+	ReportObject->SetBoolField(TEXT("visiblePoseValidated"), bVisiblePoseValidated);
 	ReportObject->SetNumberField(TEXT("textureCount"), TexCount);
 	ReportObject->SetNumberField(TEXT("expectedAnimationCount"), ExpectedAnimationCount);
 	ReportObject->SetNumberField(TEXT("animationCount"), AnimCount);
+	ReportObject->SetBoolField(TEXT("hasPhysicsAsset"), ImportedSkeletalMesh != nullptr && ImportedSkeletalMesh->GetPhysicsAsset() != nullptr);
+
+	// Resource relationship tracking
+	TSharedPtr<FJsonObject> RelationshipsObject = MakeShared<FJsonObject>();
+	RelationshipsObject->SetBoolField(TEXT("skeletalMeshBound"), ImportedSkeletalMesh != nullptr);
+	RelationshipsObject->SetBoolField(TEXT("skeletonBound"), Skeleton != nullptr);
+	RelationshipsObject->SetBoolField(TEXT("materialManifestApplied"), !bImportAnimationsOnly && bHasMaterialManifest);
+	RelationshipsObject->SetBoolField(TEXT("skillConfigImported"), !bImportAnimationsOnly && !bImportModelOnly && bHasSkills);
+	RelationshipsObject->SetBoolField(TEXT("animationsCoverageComplete"), AnimCount == ExpectedAnimationCount);
+	ReportObject->SetObjectField(TEXT("relationships"), RelationshipsObject);
+
+	// Root-motion binding results
+	TSharedPtr<FJsonObject> RootMotionObject = MakeShared<FJsonObject>();
+	RootMotionObject->SetStringField(TEXT("source"), TEXT("formal-export-summary"));
+	RootMotionObject->SetBoolField(TEXT("consumedFromFormalSummary"), !bImportModelOnly && bHasAnimations);
+	RootMotionObject->SetNumberField(TEXT("enabledCount"), RootMotionEnabledCount);
+	RootMotionObject->SetNumberField(TEXT("totalAnimations"), AnimCount);
+	TArray<TSharedPtr<FJsonValue>> RootMotionFailedValues;
+	for (const FString& Clip : RootMotionFailedClips)
+	{
+		RootMotionFailedValues.Add(MakeShared<FJsonValueString>(Clip));
+	}
+	RootMotionObject->SetArrayField(TEXT("failedClips"), RootMotionFailedValues);
+	ReportObject->SetObjectField(TEXT("rootMotion"), RootMotionObject);
+
+	// Missing animation files from formal export
+	TArray<TSharedPtr<FJsonValue>> MissingAnimValues;
+	for (const FString& MissingAnimFile : MissingAnimationFiles)
+	{
+		MissingAnimValues.Add(MakeShared<FJsonValueString>(MissingAnimFile));
+	}
+	ReportObject->SetArrayField(TEXT("missingAnimationFiles"), MissingAnimValues);
+
 	TArray<TSharedPtr<FJsonValue>> ErrorValues;
 	for (const FString& Error : Errors)
 	{
@@ -913,6 +1104,24 @@ USkeleton* USekiroImportCommandlet::FindSkeletonInPackage(const FString& Package
 	return nullptr;
 }
 
+USkeletalMesh* USekiroImportCommandlet::FindSkeletalMeshInPackage(const FString& PackagePath)
+{
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+	TArray<FAssetData> Assets;
+	AssetRegistry.GetAssetsByPath(FName(*PackagePath), Assets, true);
+
+	for (const FAssetData& Asset : Assets)
+	{
+		if (USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(Asset.GetAsset()))
+		{
+			return SkelMesh;
+		}
+	}
+
+	return nullptr;
+}
 
 bool USekiroImportCommandlet::SavePackage(UObject* Asset)
 {

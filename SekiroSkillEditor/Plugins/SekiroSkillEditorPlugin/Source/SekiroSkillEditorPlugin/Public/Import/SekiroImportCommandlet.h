@@ -29,5 +29,6 @@ private:
 	void ImportCharacter(const FString& ChrId, const FString& ExportDir, const FString& ContentBase, int32 AnimLimit = -1, const TArray<FString>& AnimFilters = TArray<FString>(), bool bImportAnimationsOnly = false, bool bImportModelOnly = false);
 
 	class USkeleton* FindSkeletonInPackage(const FString& PackagePath);
+	class USkeletalMesh* FindSkeletalMeshInPackage(const FString& PackagePath);
 	bool SavePackage(UObject* Asset);
 };

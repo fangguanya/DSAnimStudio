@@ -552,3 +552,145 @@ TArray<FSekiroTaeEvent> USekiroAssetImporter::ParseTaeEventsFromJson(
 
 	return Events;
 }
+
+bool USekiroAssetImporter::WriteBackSkillConfig(
+	const TArray<USekiroSkillDataAsset*>& SkillAssets,
+	const FString& OutputJsonPath)
+{
+	if (SkillAssets.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SekiroAssetImporter::WriteBack: No skill assets to write."));
+		return false;
+	}
+
+	// Group skills by character ID
+	TMap<FString, TArray<USekiroSkillDataAsset*>> ByCharacter;
+	for (USekiroSkillDataAsset* Skill : SkillAssets)
+	{
+		if (Skill)
+		{
+			ByCharacter.FindOrAdd(Skill->CharacterId).Add(Skill);
+		}
+	}
+
+	TSharedPtr<FJsonObject> RootObject = MakeShared<FJsonObject>();
+	RootObject->SetStringField(TEXT("deliveryMode"), TEXT("formal-only"));
+
+	TArray<TSharedPtr<FJsonValue>> CharactersArray;
+
+	for (const auto& Pair : ByCharacter)
+	{
+		const FString& CharacterId = Pair.Key;
+		const TArray<USekiroSkillDataAsset*>& Skills = Pair.Value;
+
+		TSharedPtr<FJsonObject> CharObj = MakeShared<FJsonObject>();
+		CharObj->SetStringField(TEXT("id"), CharacterId);
+
+		TArray<TSharedPtr<FJsonValue>> AnimationsArray;
+		for (const USekiroSkillDataAsset* Skill : Skills)
+		{
+			TSharedPtr<FJsonObject> AnimObj = MakeShared<FJsonObject>();
+			AnimObj->SetStringField(TEXT("name"), Skill->AnimationName);
+			AnimObj->SetStringField(TEXT("fileName"), Skill->SourceFileName);
+			AnimObj->SetNumberField(TEXT("frameCount"), Skill->FrameCount);
+			AnimObj->SetNumberField(TEXT("frameRate"), Skill->FrameRate);
+
+			// Serialize events
+			TArray<TSharedPtr<FJsonValue>> EventsArray;
+			for (const FSekiroTaeEvent& Evt : Skill->Events)
+			{
+				TSharedPtr<FJsonObject> EvtObj = MakeShared<FJsonObject>();
+				EvtObj->SetNumberField(TEXT("type"), Evt.Type);
+				EvtObj->SetStringField(TEXT("typeName"), Evt.TypeName);
+				EvtObj->SetStringField(TEXT("category"), Evt.Category);
+				EvtObj->SetNumberField(TEXT("startFrame"), Evt.StartFrame);
+				EvtObj->SetNumberField(TEXT("endFrame"), Evt.EndFrame);
+
+				TArray<TSharedPtr<FJsonValue>> ParamsArray;
+				for (const FSekiroEventParam& Param : Evt.Params)
+				{
+					TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
+					ParamObj->SetStringField(TEXT("name"), Param.Name);
+					ParamObj->SetStringField(TEXT("dataType"), Param.DataType);
+					ParamObj->SetNumberField(TEXT("byteOffset"), Param.ByteOffset);
+					ParamObj->SetStringField(TEXT("source"), Param.Source);
+
+					TSharedPtr<FJsonValue> ParsedValue;
+					TSharedRef<TJsonReader<>> ValueReader = TJsonReaderFactory<>::Create(Param.ValueJson);
+					if (FJsonSerializer::Deserialize(ValueReader, ParsedValue) && ParsedValue.IsValid())
+					{
+						ParamObj->SetField(TEXT("value"), ParsedValue);
+					}
+					else
+					{
+						ParamObj->SetStringField(TEXT("value"), Param.ValueJson);
+					}
+
+					ParamsArray.Add(MakeShared<FJsonValueObject>(ParamObj));
+				}
+				EvtObj->SetArrayField(TEXT("params"), ParamsArray);
+
+				TSharedPtr<FJsonObject> LinksObj = MakeShared<FJsonObject>();
+				for (const FSekiroSemanticLink& Link : Evt.SemanticLinks)
+				{
+					TSharedPtr<FJsonValue> ParsedLink;
+					TSharedRef<TJsonReader<>> LinkReader = TJsonReaderFactory<>::Create(Link.ValueJson);
+					if (FJsonSerializer::Deserialize(LinkReader, ParsedLink) && ParsedLink.IsValid())
+					{
+						LinksObj->SetField(Link.Name, ParsedLink);
+					}
+					else
+					{
+						LinksObj->SetStringField(Link.Name, Link.ValueJson);
+					}
+				}
+				EvtObj->SetObjectField(TEXT("semanticLinks"), LinksObj);
+
+				EventsArray.Add(MakeShared<FJsonValueObject>(EvtObj));
+			}
+			AnimObj->SetArrayField(TEXT("events"), EventsArray);
+
+			if (Skill->RootMotion.Samples.Num() > 0)
+			{
+				TSharedPtr<FJsonObject> RmObj = MakeShared<FJsonObject>();
+				RmObj->SetNumberField(TEXT("frameRate"), Skill->RootMotion.FrameRate);
+				RmObj->SetNumberField(TEXT("durationSeconds"), Skill->RootMotion.DurationSeconds);
+
+				TArray<TSharedPtr<FJsonValue>> SamplesArray;
+				for (const FSekiroRootMotionSample& Sample : Skill->RootMotion.Samples)
+				{
+					TSharedPtr<FJsonObject> SampleObj = MakeShared<FJsonObject>();
+					SampleObj->SetNumberField(TEXT("frameIndex"), Sample.FrameIndex);
+					SampleObj->SetNumberField(TEXT("timeSeconds"), Sample.TimeSeconds);
+					SampleObj->SetNumberField(TEXT("translationX"), Sample.Translation.X);
+					SampleObj->SetNumberField(TEXT("translationY"), Sample.Translation.Y);
+					SampleObj->SetNumberField(TEXT("translationZ"), Sample.Translation.Z);
+					SampleObj->SetNumberField(TEXT("yawRadians"), Sample.YawRadians);
+					SamplesArray.Add(MakeShared<FJsonValueObject>(SampleObj));
+				}
+				RmObj->SetArrayField(TEXT("samples"), SamplesArray);
+				AnimObj->SetObjectField(TEXT("rootMotion"), RmObj);
+			}
+
+			AnimationsArray.Add(MakeShared<FJsonValueObject>(AnimObj));
+		}
+
+		CharObj->SetArrayField(TEXT("animations"), AnimationsArray);
+		CharactersArray.Add(MakeShared<FJsonValueObject>(CharObj));
+	}
+
+	RootObject->SetArrayField(TEXT("characters"), CharactersArray);
+
+	FString OutputString;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
+	FJsonSerializer::Serialize(RootObject.ToSharedRef(), Writer);
+
+	if (!FFileHelper::SaveStringToFile(OutputString, *OutputJsonPath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("SekiroAssetImporter::WriteBack: Failed to write: %s"), *OutputJsonPath);
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("SekiroAssetImporter::WriteBack: Written %d skills to '%s'"), SkillAssets.Num(), *OutputJsonPath);
+	return true;
+}

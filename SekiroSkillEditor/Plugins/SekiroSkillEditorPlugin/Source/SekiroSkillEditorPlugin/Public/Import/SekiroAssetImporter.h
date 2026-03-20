@@ -37,4 +37,17 @@ public:
 	 * @return Array of parsed TAE event structs.
 	 */
 	static TArray<FSekiroTaeEvent> ParseTaeEventsFromJson(const TSharedPtr<FJsonObject>& AnimJson);
+
+	/**
+	 * Writes skill data assets back to a skill_config.json file.
+	 * This is the reverse of ImportSkillConfig: serializes the current state
+	 * of the skill data assets so that edits in the editor become the single
+	 * source of truth.
+	 *
+	 * @param SkillAssets         Array of skill data assets to serialize.
+	 * @param OutputJsonPath      Absolute path where skill_config.json will be written.
+	 * @return True if the write succeeded.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Sekiro|Import")
+	static bool WriteBackSkillConfig(const TArray<USekiroSkillDataAsset*>& SkillAssets, const FString& OutputJsonPath);
 };

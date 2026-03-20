@@ -15,6 +15,7 @@
 void SSekiroSkillBrowser::Construct(const FArguments& InArgs)
 {
 	OnSkillSelected = InArgs._OnSkillSelected;
+	OnSkillDoubleClicked = InArgs._OnSkillDoubleClicked;
 
 	RefreshAssetList();
 
@@ -46,6 +47,7 @@ void SSekiroSkillBrowser::Construct(const FArguments& InArgs)
 				.OnGenerateRow(this, &SSekiroSkillBrowser::OnGenerateRow)
 				.OnGetChildren(this, &SSekiroSkillBrowser::OnGetChildren)
 				.OnSelectionChanged(this, &SSekiroSkillBrowser::OnSelectionChanged)
+				.OnMouseButtonDoubleClick(this, &SSekiroSkillBrowser::OnItemDoubleClicked)
 				.SelectionMode(ESelectionMode::Single)
 			]
 		]
@@ -186,5 +188,20 @@ void SSekiroSkillBrowser::OnSelectionChanged(
 	if (Asset)
 	{
 		OnSkillSelected.ExecuteIfBound(Asset);
+	}
+}
+
+void SSekiroSkillBrowser::OnItemDoubleClicked(
+	TSharedPtr<FSekiroSkillBrowserItem> Item)
+{
+	if (!Item.IsValid() || Item->bIsGroup)
+	{
+		return;
+	}
+
+	USekiroSkillDataAsset* Asset = Item->SkillAsset.Get();
+	if (Asset)
+	{
+		OnSkillDoubleClicked.ExecuteIfBound(Asset);
 	}
 }
