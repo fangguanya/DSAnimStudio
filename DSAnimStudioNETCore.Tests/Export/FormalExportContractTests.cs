@@ -243,6 +243,103 @@ namespace DSAnimStudioNETCore.Tests.Export
     }
 
     [TestFixture]
+    public class FormalFailClosedTests
+    {
+        [Test]
+        public void FormalAssetPackageSummary_MissingRequiredDeliverable_MarksFormalSuccessFalse()
+        {
+            var summary = new FormalAssetPackageSummary
+            {
+                CharacterId = "c0000",
+                FormalSuccess = true,
+            };
+
+            var model = summary.GetOrAdd("model", required: true);
+            model.Status = "ready";
+
+            var textures = summary.GetOrAdd("textures", required: true);
+            textures.Status = "missing";
+
+            summary.FormalSuccess = summary.Deliverables
+                .Where(kvp => kvp.Value.Required)
+                .All(kvp => kvp.Value.Status == "ready");
+
+            Assert.That(summary.FormalSuccess, Is.False, "FormalSuccess must be false when a required deliverable is missing");
+        }
+
+        [Test]
+        public void FormalAssetPackageSummary_MissingOptionalDeliverable_DoesNotAffectFormalSuccess()
+        {
+            var summary = new FormalAssetPackageSummary
+            {
+                CharacterId = "c0000",
+            };
+
+            var model = summary.GetOrAdd("model", required: true);
+            model.Status = "ready";
+
+            var debug = summary.GetOrAdd("debugArtifacts", required: false);
+            debug.Status = "missing";
+
+            summary.FormalSuccess = summary.Deliverables
+                .Where(kvp => kvp.Value.Required)
+                .All(kvp => kvp.Value.Status == "ready");
+
+            Assert.That(summary.FormalSuccess, Is.True, "FormalSuccess must be true when only optional deliverables are missing");
+        }
+
+        [Test]
+        public void FormalAssetPackageSummary_MaterialManifestFailure_RecordsFailureReason()
+        {
+            var summary = new FormalAssetPackageSummary { CharacterId = "c0000" };
+            var materialManifest = summary.GetOrAdd("materialManifest", required: true);
+            materialManifest.Status = "failed";
+            materialManifest.FailureReasons.Add("Referenced texture 'c0000_a' not exported");
+
+            Assert.That(materialManifest.FailureReasons.Count, Is.EqualTo(1));
+            Assert.That(materialManifest.Status, Is.EqualTo("failed"));
+        }
+
+        [Test]
+        public void FormalAnimationResolution_MissingRootMotion_MarksResolutionFailed()
+        {
+            var resolution = new FormalAnimationResolution
+            {
+                RequestTaeId = 100,
+                RequestTaeName = "a000_000100",
+                RootMotionSourcePresent = true,
+                RootMotion = null,
+                DeliverableAnimFileName = "a000_000100.gltf",
+            };
+
+            Assert.That(resolution.RootMotionSourcePresent, Is.True);
+            Assert.That(resolution.RootMotion, Is.Null, "RootMotion must be null when extraction fails");
+        }
+
+        [Test]
+        public void FormalRootMotionTrack_ZeroSamples_IndicatesMissingRootMotion()
+        {
+            var track = new FormalRootMotionTrack
+            {
+                FrameRate = 30.0f,
+                DurationSeconds = 1.0f,
+            };
+
+            Assert.That(track.Samples.Count, Is.EqualTo(0), "Empty samples indicate missing root-motion");
+        }
+
+        [Test]
+        public void FormalTextureContract_UnsupportedFormat_MarksAsFailure()
+        {
+            var supportedFormats = new[] { "BC7", "DXT1", "DXT3", "DXT5", "BC4", "BC5", "BC6H", "ATI1", "ATI2", "A8", "R8G8B8A8" };
+            var unsupportedFormat = "BC2";
+
+            var isFormal = FormalTextureContract.IsFormalSourceFormat(unsupportedFormat);
+            Assert.That(isFormal, Is.False, "BC2 is not a formal texture format");
+        }
+    }
+
+    [TestFixture]
     public class MaterialManifestExporterTests
     {
         [Test]
