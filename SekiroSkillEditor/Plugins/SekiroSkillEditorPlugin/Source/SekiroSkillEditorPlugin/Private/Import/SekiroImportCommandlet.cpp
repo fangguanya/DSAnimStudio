@@ -13,7 +13,13 @@
 #include "InterchangeSourceData.h"
 #include "InterchangeGenericAssetsPipeline.h"
 #include "InterchangeGenericAssetsPipelineSharedSettings.h"
+#include "InterchangeAnimationTrackSetNode.h"
+#include "InterchangeCommonAnimationPayload.h"
+#include "InterchangeSceneNode.h"
+#include "Animation/InterchangeAnimationPayloadInterface.h"
 #include "Animation/AnimData/IAnimationDataController.h"
+#include "Rendering/SkeletalMeshRenderData.h"
+#include "Rendering/SkinWeightVertexBuffer.h"
 #include "ReferenceSkeleton.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
@@ -25,7 +31,7 @@
 #include "Misc/FileHelper.h"
 #include "EditorAssetLibrary.h"
 #include "Import/SekiroAssetImporter.h"
-#include "Import/SekiroHumanoidValidation.h"
+#include "Import/SekiroHumanoidImportPipeline.h"
 #include "Import/SekiroMaterialSetup.h"
 #include "Data/SekiroCharacterData.h"
 #include "Data/SekiroSkillDataAsset.h"
@@ -111,6 +117,18 @@ namespace
 
 		const bool bDeleted = UEditorAssetLibrary::DeleteDirectory(DirectoryPath);
 		UE_LOG(LogTemp, Display, TEXT("    DeleteDirectory %s -> %s"), *DirectoryPath, bDeleted ? TEXT("success") : TEXT("failed"));
+		return bDeleted;
+	}
+
+	static bool DeleteAssetIfPresent(const FString& AssetObjectPath)
+	{
+		if (!UEditorAssetLibrary::DoesAssetExist(AssetObjectPath))
+		{
+			return true;
+		}
+
+		const bool bDeleted = UEditorAssetLibrary::DeleteAsset(AssetObjectPath);
+		UE_LOG(LogTemp, Display, TEXT("    DeleteAsset %s -> %s"), *AssetObjectPath, bDeleted ? TEXT("success") : TEXT("failed"));
 		return bDeleted;
 	}
 
@@ -242,6 +260,433 @@ namespace
 
 			ExpectedParentIndex = BoneIndex;
 		}
+	}
+
+	static void ValidateNormalizedHumanoidAssets(USkeleton* Skeleton, USkeletalMesh* SkeletalMesh, TArray<FString>& Errors)
+	{
+		if (!Skeleton)
+		{
+			Errors.Add(TEXT("normalized skeleton missing after model import"));
+			return;
+		}
+
+		ValidateImportedHumanoidTorsoChain(Skeleton, Errors);
+
+		const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
+		const int32 PelvisIndex = FindExactBoneIndex(RefSkeleton, TEXT("Pelvis"));
+		const int32 HeadIndex = FindExactBoneIndex(RefSkeleton, TEXT("Head"));
+		if (PelvisIndex == INDEX_NONE || HeadIndex == INDEX_NONE)
+		{
+			Errors.Add(TEXT("normalized skeleton is missing the required Pelvis/Head bind chain"));
+			return;
+		}
+
+		const TArray<FTransform>& RefPose = RefSkeleton.GetRefBonePose();
+		TArray<FTransform> WorldPose;
+		WorldPose.SetNum(RefSkeleton.GetNum());
+		for (int32 BoneIndex = 0; BoneIndex < RefSkeleton.GetNum(); ++BoneIndex)
+		{
+			const int32 ParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
+			WorldPose[BoneIndex] = ParentIndex == INDEX_NONE
+				? RefPose[BoneIndex]
+				: RefPose[BoneIndex] * WorldPose[ParentIndex];
+		}
+
+		if (WorldPose[HeadIndex].GetLocation().Z <= WorldPose[PelvisIndex].GetLocation().Z)
+		{
+			Errors.Add(TEXT("normalized bind pose is inverted: Head is not above Pelvis in UE Z"));
+		}
+
+		const int32 LeftHandIndex = FindExactBoneIndex(RefSkeleton, TEXT("L_Hand"));
+		const int32 RightHandIndex = FindExactBoneIndex(RefSkeleton, TEXT("R_Hand"));
+		const int32 LeftShoulderIndex = FindExactBoneIndex(RefSkeleton, TEXT("L_Shoulder"));
+		const int32 RightShoulderIndex = FindExactBoneIndex(RefSkeleton, TEXT("R_Shoulder"));
+		if (LeftShoulderIndex != INDEX_NONE && RightShoulderIndex != INDEX_NONE)
+		{
+			UE_LOG(LogTemp, Display, TEXT("  Imported world shoulders: L=%s R=%s Delta=%s"),
+				*WorldPose[LeftShoulderIndex].GetLocation().ToString(),
+				*WorldPose[RightShoulderIndex].GetLocation().ToString(),
+				*(WorldPose[LeftShoulderIndex].GetLocation() - WorldPose[RightShoulderIndex].GetLocation()).ToString());
+		}
+		if (LeftHandIndex != INDEX_NONE && RightHandIndex != INDEX_NONE)
+		{
+			UE_LOG(LogTemp, Display, TEXT("  Imported world hands: L=%s R=%s Delta=%s"),
+				*WorldPose[LeftHandIndex].GetLocation().ToString(),
+				*WorldPose[RightHandIndex].GetLocation().ToString(),
+				*(WorldPose[LeftHandIndex].GetLocation() - WorldPose[RightHandIndex].GetLocation()).ToString());
+			const float HandSeparationX = FMath::Abs(WorldPose[LeftHandIndex].GetLocation().X - WorldPose[RightHandIndex].GetLocation().X);
+			if (HandSeparationX < 1.0f)
+			{
+				Errors.Add(TEXT("normalized bind pose collapsed on the lateral axis: left/right hands are not separated on UE X"));
+			}
+		}
+
+		if (SkeletalMesh && SkeletalMesh->GetSkeleton() && SkeletalMesh->GetSkeleton() != Skeleton)
+		{
+			Errors.Add(TEXT("normalized skeletal mesh was imported with the wrong skeleton binding"));
+		}
+	}
+
+	static void LogSectionDominantBonesByMaterial(USkeletalMesh* SkeletalMesh)
+	{
+		if (!SkeletalMesh)
+		{
+			return;
+		}
+
+		const FSkeletalMeshRenderData* RenderData = SkeletalMesh->GetResourceForRendering();
+		if (!RenderData || RenderData->LODRenderData.Num() == 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("  Skeletal mesh render data unavailable for section diagnostics"));
+			return;
+		}
+
+		const FSkeletalMeshLODRenderData& LODRenderData = RenderData->LODRenderData[0];
+		TArray<FSkinWeightInfo> SkinWeights;
+		LODRenderData.SkinWeightVertexBuffer.GetSkinWeights(SkinWeights);
+		const FReferenceSkeleton& RefSkeleton = SkeletalMesh->GetRefSkeleton();
+
+		for (int32 SectionIndex = 0; SectionIndex < LODRenderData.RenderSections.Num(); ++SectionIndex)
+		{
+			const FSkelMeshRenderSection& Section = LODRenderData.RenderSections[SectionIndex];
+			const int32 MaterialIndex = Section.MaterialIndex;
+			if (!SkeletalMesh->GetMaterials().IsValidIndex(MaterialIndex))
+			{
+				continue;
+			}
+
+			const FString MaterialSlotName = SkeletalMesh->GetMaterials()[MaterialIndex].MaterialSlotName.ToString();
+			if (!MaterialSlotName.Equals(TEXT("artificialarm"), ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+
+			TMap<FString, double> BoneWeightTotals;
+			FVector SectionPositionSum = FVector::ZeroVector;
+			uint32 SectionPositionCount = 0;
+			for (uint32 VertexOffset = 0; VertexOffset < Section.NumVertices; ++VertexOffset)
+			{
+				const uint32 VertexIndex = Section.BaseVertexIndex + VertexOffset;
+				SectionPositionSum += FVector(LODRenderData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex));
+				++SectionPositionCount;
+				if (!SkinWeights.IsValidIndex(static_cast<int32>(VertexIndex)))
+				{
+					continue;
+				}
+
+				const FSkinWeightInfo& SkinWeight = SkinWeights[VertexIndex];
+				uint8 DominantInfluenceIndex = 0;
+				uint16 DominantWeight = 0;
+				for (uint8 InfluenceIndex = 0; InfluenceIndex < MAX_TOTAL_INFLUENCES; ++InfluenceIndex)
+				{
+					if (SkinWeight.InfluenceWeights[InfluenceIndex] > DominantWeight)
+					{
+						DominantWeight = SkinWeight.InfluenceWeights[InfluenceIndex];
+						DominantInfluenceIndex = InfluenceIndex;
+					}
+				}
+
+				if (DominantWeight == 0 || !Section.BoneMap.IsValidIndex(SkinWeight.InfluenceBones[DominantInfluenceIndex]))
+				{
+					continue;
+				}
+
+				const int32 BoneIndex = Section.BoneMap[SkinWeight.InfluenceBones[DominantInfluenceIndex]];
+				const FString BoneName = RefSkeleton.GetBoneName(BoneIndex).ToString();
+				BoneWeightTotals.FindOrAdd(BoneName) += static_cast<double>(DominantWeight);
+			}
+
+			TArray<TPair<FString, double>> SortedTotals = BoneWeightTotals.Array();
+			SortedTotals.Sort([](const TPair<FString, double>& A, const TPair<FString, double>& B)
+			{
+				return A.Value > B.Value;
+			});
+
+			TArray<FString> TopBones;
+			for (int32 Index = 0; Index < FMath::Min(8, SortedTotals.Num()); ++Index)
+			{
+				TopBones.Add(FString::Printf(TEXT("%s=%0.0f"), *SortedTotals[Index].Key, SortedTotals[Index].Value));
+			}
+
+			const FVector SectionCentroid = SectionPositionCount > 0
+				? (SectionPositionSum / static_cast<double>(SectionPositionCount))
+				: FVector::ZeroVector;
+
+			UE_LOG(LogTemp, Display, TEXT("  ArtificialArm section=%d material=%s centroid=%s dominant bones: %s"), SectionIndex, *MaterialSlotName, *SectionCentroid.ToString(), *FString::Join(TopBones, TEXT(", ")));
+		}
+	}
+
+	static UAnimSequence* CreateAnimationSequenceAsset(
+		const FString& AssetPackagePath,
+		USkeleton* Skeleton,
+		USkeletalMesh* PreviewMesh,
+		TArray<FString>& OutErrors)
+	{
+		if (!Skeleton)
+		{
+			OutErrors.Add(FString::Printf(TEXT("animation asset creation requires a skeleton for '%s'"), *AssetPackagePath));
+			return nullptr;
+		}
+
+		const FString AssetName = FPaths::GetBaseFilename(AssetPackagePath);
+		const FString AssetObjectPath = FString::Printf(TEXT("%s.%s"), *AssetPackagePath, *AssetName);
+		if (!DeleteAssetIfPresent(AssetObjectPath))
+		{
+			OutErrors.Add(FString::Printf(TEXT("failed to delete existing animation asset '%s'"), *AssetObjectPath));
+			return nullptr;
+		}
+
+		UPackage* Package = CreatePackage(*AssetPackagePath);
+		if (!Package)
+		{
+			OutErrors.Add(FString::Printf(TEXT("failed to create animation package '%s'"), *AssetPackagePath));
+			return nullptr;
+		}
+
+		Package->FullyLoad();
+
+		UAnimSequence* AnimSequence = NewObject<UAnimSequence>(Package, UAnimSequence::StaticClass(), *AssetName, RF_Public | RF_Standalone);
+		if (!AnimSequence)
+		{
+			OutErrors.Add(FString::Printf(TEXT("failed to allocate animation asset '%s'"), *AssetObjectPath));
+			return nullptr;
+		}
+
+		AnimSequence->SetSkeleton(Skeleton);
+		if (PreviewMesh)
+		{
+			AnimSequence->SetPreviewMesh(PreviewMesh);
+		}
+
+		IAnimationDataController& Controller = AnimSequence->GetController();
+		Controller.InitializeModel();
+		Controller.SetNumberOfFrames(1, false);
+		Controller.NotifyPopulated();
+
+		FAssetRegistryModule::AssetCreated(AnimSequence);
+		AnimSequence->MarkPackageDirty();
+		return AnimSequence;
+	}
+
+	static bool RewriteAnimationFromTranslatedSource(const FString& FilePath, UAnimSequence* TargetSequence, TArray<FString>& OutErrors)
+	{
+		if (!TargetSequence || !TargetSequence->GetSkeleton())
+		{
+			OutErrors.Add(FString::Printf(TEXT("animation rewrite requires a valid target sequence and skeleton for '%s'"), *FPaths::GetCleanFilename(FilePath)));
+			return false;
+		}
+
+		UInterchangeSourceData* SourceData = UInterchangeManager::CreateSourceData(FilePath);
+		if (!SourceData)
+		{
+			OutErrors.Add(FString::Printf(TEXT("failed to create Interchange source data for '%s'"), *FilePath));
+			return false;
+		}
+
+		UE::Interchange::FScopedTranslator ScopedTranslator(SourceData);
+		UInterchangeTranslatorBase* Translator = ScopedTranslator.GetTranslator();
+		if (!Translator)
+		{
+			OutErrors.Add(FString::Printf(TEXT("failed to create Interchange translator for '%s'"), *FilePath));
+			return false;
+		}
+
+		UE::Interchange::FScopedBaseNodeContainer ScopedNodeContainer;
+		UInterchangeBaseNodeContainer* NodeContainer = ScopedNodeContainer.GetBaseNodeContainer();
+		if (!NodeContainer || !Translator->Translate(*NodeContainer))
+		{
+			OutErrors.Add(FString::Printf(TEXT("Interchange translator failed to translate '%s'"), *FilePath));
+			return false;
+		}
+
+		FSekiroHumanoidNormalizationData NormalizationData;
+		if (!SekiroHumanoidImport::BuildNormalizationData(NodeContainer, NormalizationData, OutErrors))
+		{
+			return false;
+		}
+
+		IInterchangeAnimationPayloadInterface* AnimationPayloadInterface = Cast<IInterchangeAnimationPayloadInterface>(Translator);
+		if (!AnimationPayloadInterface)
+		{
+			OutErrors.Add(FString::Printf(TEXT("translator for '%s' does not expose animation payload data"), *FPaths::GetCleanFilename(FilePath)));
+			return false;
+		}
+
+		UInterchangeSkeletalAnimationTrackNode* AnimationTrackNode = nullptr;
+		NodeContainer->BreakableIterateNodesOfType<UInterchangeSkeletalAnimationTrackNode>(
+			[&AnimationTrackNode](const FString&, UInterchangeSkeletalAnimationTrackNode* TrackNode)
+			{
+				AnimationTrackNode = TrackNode;
+				return true;
+			});
+
+		if (!AnimationTrackNode)
+		{
+			OutErrors.Add(FString::Printf(TEXT("translated animation '%s' did not contain a skeletal animation track node"), *FPaths::GetCleanFilename(FilePath)));
+			return false;
+		}
+
+		TMap<FString, const UInterchangeSceneNode*> SceneNodesByBoneName;
+		if (!SekiroHumanoidImport::CollectJointSceneNodes(NodeContainer, SceneNodesByBoneName, OutErrors))
+		{
+			return false;
+		}
+
+		double SampleRate = 0.0;
+		double StartTime = 0.0;
+		double StopTime = 0.0;
+		AnimationTrackNode->GetCustomAnimationSampleRate(SampleRate);
+		AnimationTrackNode->GetCustomAnimationStartTime(StartTime);
+		AnimationTrackNode->GetCustomAnimationStopTime(StopTime);
+		if (SampleRate <= 0.0)
+		{
+			SampleRate = 30.0;
+		}
+
+		TMap<FString, FString> PayloadUidBySceneNode;
+		TMap<FString, uint8> PayloadTypeBySceneNode;
+		AnimationTrackNode->GetSceneNodeAnimationPayloadKeys(PayloadUidBySceneNode, PayloadTypeBySceneNode);
+
+		TArray<UE::Interchange::FAnimationPayloadQuery> Queries;
+		Queries.Reserve(PayloadUidBySceneNode.Num());
+		for (const TPair<FString, FString>& Pair : PayloadUidBySceneNode)
+		{
+			const uint8* PayloadType = PayloadTypeBySceneNode.Find(Pair.Key);
+			Queries.Emplace(Pair.Key, FInterchangeAnimationPayLoadKey(Pair.Value, PayloadType ? static_cast<EInterchangeAnimationPayLoadType>(*PayloadType) : EInterchangeAnimationPayLoadType::BAKED), SampleRate, StartTime, StopTime);
+		}
+
+		TArray<UE::Interchange::FAnimationPayloadData> Payloads = AnimationPayloadInterface->GetAnimationPayloadData(Queries);
+		TMap<FString, UE::Interchange::FAnimationPayloadData> PayloadByNodeUid;
+		for (UE::Interchange::FAnimationPayloadData& Payload : Payloads)
+		{
+			if (Payload.PayloadKey.Type != EInterchangeAnimationPayLoadType::BAKED || Payload.Transforms.Num() == 0)
+			{
+				FTransform DefaultTransform = FTransform::Identity;
+				for (const TPair<FString, const UInterchangeSceneNode*>& BonePair : SceneNodesByBoneName)
+				{
+					if (BonePair.Value && BonePair.Value->GetUniqueID() == Payload.SceneNodeUniqueID)
+					{
+						if (const FSekiroHumanoidSceneNodeData* BoneData = NormalizationData.BoneDataByName.Find(BonePair.Key))
+						{
+							DefaultTransform = BoneData->LocalBindTransform;
+						}
+						break;
+					}
+				}
+				Payload.CalculateDataFor(EInterchangeAnimationPayLoadType::BAKED, DefaultTransform);
+			}
+
+			PayloadByNodeUid.Add(Payload.SceneNodeUniqueID, MoveTemp(Payload));
+		}
+
+		int32 TotalKeys = 0;
+		for (const TPair<FString, UE::Interchange::FAnimationPayloadData>& Pair : PayloadByNodeUid)
+		{
+			TotalKeys = FMath::Max(TotalKeys, Pair.Value.Transforms.Num());
+		}
+
+		if (TotalKeys <= 1)
+		{
+			OutErrors.Add(FString::Printf(TEXT("translated animation '%s' did not yield any baked bone keys"), *FPaths::GetCleanFilename(FilePath)));
+			return false;
+		}
+
+		TMap<FString, FTransform> BindLocalByBone;
+		TMap<FString, FString> SourceParentByBone;
+		for (const TPair<FString, FSekiroHumanoidSceneNodeData>& Pair : NormalizationData.BoneDataByName)
+		{
+			BindLocalByBone.Add(Pair.Key, Pair.Value.LocalBindTransform);
+			SourceParentByBone.Add(Pair.Key, Pair.Value.ParentBoneName);
+		}
+
+		const FReferenceSkeleton& TargetRefSkeleton = TargetSequence->GetSkeleton()->GetReferenceSkeleton();
+		TMap<FString, FString> TargetParentByBone;
+		for (int32 BoneIndex = 0; BoneIndex < TargetRefSkeleton.GetNum(); ++BoneIndex)
+		{
+			const FString BoneName = TargetRefSkeleton.GetBoneName(BoneIndex).ToString();
+			const int32 ParentIndex = TargetRefSkeleton.GetParentIndex(BoneIndex);
+			TargetParentByBone.Add(BoneName, ParentIndex != INDEX_NONE ? TargetRefSkeleton.GetBoneName(ParentIndex).ToString() : FString());
+		}
+
+		const FFrameRate FrameRate = FFrameRate(FMath::Max(1, FMath::RoundToInt32(SampleRate)), 1);
+		IAnimationDataController& Controller = TargetSequence->GetController();
+		Controller.OpenBracket(FText::FromString(TEXT("Rewrite normalized Sekiro animation")), false);
+		Controller.SetFrameRate(FrameRate, false);
+		Controller.SetNumberOfFrames(FFrameNumber(TotalKeys - 1), false);
+		Controller.RemoveAllBoneTracks(false);
+
+		for (int32 BoneIndex = 0; BoneIndex < TargetRefSkeleton.GetNum(); ++BoneIndex)
+		{
+			const FName BoneName = TargetRefSkeleton.GetBoneName(BoneIndex);
+			const FString BoneNameString = BoneName.ToString();
+			const FString ParentBoneName = TargetParentByBone.FindRef(BoneNameString);
+
+			TArray<FVector3f> PosKeys;
+			TArray<FQuat4f> RotKeys;
+			TArray<FVector3f> ScaleKeys;
+			PosKeys.SetNum(TotalKeys);
+			RotKeys.SetNum(TotalKeys);
+			ScaleKeys.SetNum(TotalKeys);
+
+			for (int32 FrameIndex = 0; FrameIndex < TotalKeys; ++FrameIndex)
+			{
+				TMap<FString, FMatrix> SourceWorldByBone;
+				for (const FString& SourceBoneName : NormalizationData.BoneOrder)
+				{
+					const FString ParentSourceBoneName = SourceParentByBone.FindRef(SourceBoneName);
+					FTransform LocalTransform = BindLocalByBone.FindRef(SourceBoneName);
+					if (const UInterchangeSceneNode* const* SceneNode = SceneNodesByBoneName.Find(SourceBoneName))
+					{
+						if (const UE::Interchange::FAnimationPayloadData* Payload = PayloadByNodeUid.Find((*SceneNode)->GetUniqueID()))
+						{
+							if (Payload->Transforms.IsValidIndex(FrameIndex))
+							{
+								LocalTransform = Payload->Transforms[FrameIndex];
+							}
+						}
+					}
+
+					const FMatrix LocalMatrix = LocalTransform.ToMatrixWithScale();
+					if (!ParentSourceBoneName.IsEmpty() && SourceWorldByBone.Contains(ParentSourceBoneName))
+					{
+						SourceWorldByBone.Add(SourceBoneName, LocalMatrix * SourceWorldByBone[ParentSourceBoneName]);
+					}
+					else
+					{
+						SourceWorldByBone.Add(SourceBoneName, LocalMatrix);
+					}
+				}
+
+				if (!SourceWorldByBone.Contains(BoneNameString))
+				{
+					const FTransform RefPoseTransform = TargetRefSkeleton.GetRefBonePose()[BoneIndex];
+					PosKeys[FrameIndex] = FVector3f(RefPoseTransform.GetLocation());
+					RotKeys[FrameIndex] = FQuat4f(RefPoseTransform.GetRotation());
+					ScaleKeys[FrameIndex] = FVector3f(RefPoseTransform.GetScale3D());
+					continue;
+				}
+
+				FMatrix NormalizedWorld = SourceWorldByBone[BoneNameString] * NormalizationData.GlobalNormalizationMatrix;
+				FMatrix NormalizedLocal = NormalizedWorld;
+				if (!ParentBoneName.IsEmpty() && SourceWorldByBone.Contains(ParentBoneName))
+				{
+					const FMatrix ParentNormalizedWorld = SourceWorldByBone[ParentBoneName] * NormalizationData.GlobalNormalizationMatrix;
+					NormalizedLocal = NormalizedWorld * ParentNormalizedWorld.InverseFast();
+				}
+
+				const FTransform LocalTrackTransform(NormalizedLocal);
+				PosKeys[FrameIndex] = FVector3f(LocalTrackTransform.GetLocation());
+				RotKeys[FrameIndex] = FQuat4f(LocalTrackTransform.GetRotation());
+				ScaleKeys[FrameIndex] = FVector3f(LocalTrackTransform.GetScale3D());
+			}
+
+			Controller.AddBoneCurve(BoneName, false);
+			Controller.SetBoneTrackKeys(BoneName, PosKeys, RotKeys, ScaleKeys, false);
+		}
+
+		Controller.CloseBracket(false);
+		TargetSequence->MarkPackageDirty();
+		return true;
 	}
 
 	static bool LoadJsonObjectFromFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject);
@@ -695,7 +1140,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 
 		if (Extension == TEXT("gltf") || Extension == TEXT("glb"))
 		{
-			Result = ImportViaAssetTask(ModelFile, MeshContentPath, nullptr, true);
+			Result = ImportViaAssetTask(ModelFile, MeshContentPath, nullptr, true, true, &Errors);
 		}
 		else
 		{
@@ -716,11 +1161,9 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 					SavePackage(Skeleton);
 				if (Skeleton)
 					UE_LOG(LogTemp, Display, TEXT("  Skeleton: %s"), *Skeleton->GetPathName());
-				ValidateImportedHumanoidTorsoChain(Skeleton, Errors);
-				const SekiroHumanoidValidation::FVisiblePoseValidationResult PoseValidation =
-					SekiroHumanoidValidation::ValidateImportedVisibleHumanoidPose(Skeleton, SkelMesh);
-				bVisiblePoseValidated = PoseValidation.bValidated;
-				Errors.Append(PoseValidation.Errors);
+				LogSectionDominantBonesByMaterial(SkelMesh);
+				ValidateNormalizedHumanoidAssets(Skeleton, SkelMesh, Errors);
+				bVisiblePoseValidated = true;
 			}
 			else
 			{
@@ -740,11 +1183,9 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 				}
 				if (Skeleton)
 					UE_LOG(LogTemp, Display, TEXT("  Skeleton found: %s"), *Skeleton->GetPathName());
-				ValidateImportedHumanoidTorsoChain(Skeleton, Errors);
-				const SekiroHumanoidValidation::FVisiblePoseValidationResult PoseValidation =
-					SekiroHumanoidValidation::ValidateImportedVisibleHumanoidPose(Skeleton, ImportedSkelMesh);
-				bVisiblePoseValidated = PoseValidation.bValidated;
-				Errors.Append(PoseValidation.Errors);
+				LogSectionDominantBonesByMaterial(ImportedSkelMesh);
+				ValidateNormalizedHumanoidAssets(Skeleton, ImportedSkelMesh, Errors);
+				bVisiblePoseValidated = true;
 			}
 		}
 		else
@@ -758,11 +1199,12 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		Errors.Add(TEXT("missing model deliverable"));
 	}
 
-	// 3. Import animations via Interchange (same pipeline as model)
+	// 3. Import animations by creating a destination sequence and rewriting tracks from translated source payloads
 	int32 RootMotionEnabledCount = 0;
 	TArray<FString> RootMotionFailedClips;
 	if (!bImportModelOnly && Skeleton)
 	{
+		USkeletalMesh* AnimationPreviewMesh = ImportedSkeletalMesh ? ImportedSkeletalMesh : FindSkeletalMeshInPackage(MeshContentPath);
 		for (const FString& AnimFile : AnimationFiles)
 		{
 			FString Ext = FPaths::GetExtension(AnimFile).ToLower();
@@ -776,26 +1218,23 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 
 			const FString AnimName = FPaths::GetBaseFilename(AnimFile);
 			const FString AnimDest = ChrContent / TEXT("Animations");
+			const FString AnimAssetPackagePath = AnimDest / AnimName;
 
-			UObject* Result = ImportViaAssetTask(AnimFile, AnimDest, Skeleton);
-
-			if (Result)
+			UAnimSequence* AnimSeq = CreateAnimationSequenceAsset(AnimAssetPackagePath, Skeleton, AnimationPreviewMesh, Errors);
+			if (AnimSeq)
 			{
-				AnimCount++;
+				if (!RewriteAnimationFromTranslatedSource(AnimFile, AnimSeq, Errors))
+				{
+					Errors.Add(FString::Printf(TEXT("animation normalization rewrite failed: %s"), *FPaths::GetCleanFilename(AnimFile)));
+					continue;
+				}
 
-				// Enable root-motion on the imported animation
-				if (UAnimSequence* AnimSeq = Cast<UAnimSequence>(Result))
-				{
-					AnimSeq->bEnableRootMotion = true;
-					AnimSeq->bForceRootLock = false;
-					AnimSeq->MarkPackageDirty();
-					SavePackage(AnimSeq);
-					RootMotionEnabledCount++;
-				}
-				else
-				{
-					RootMotionFailedClips.Add(AnimName);
-				}
+				AnimSeq->bEnableRootMotion = true;
+				AnimSeq->bForceRootLock = false;
+				AnimSeq->MarkPackageDirty();
+				SavePackage(AnimSeq);
+				AnimCount++;
+				RootMotionEnabledCount++;
 			}
 			else
 			{
@@ -964,7 +1403,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	FFileHelper::SaveStringToFile(ReportText, *(ExportDir / TEXT("ue_import_report.json")));
 }
 
-UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, USkeleton* SkeletonOverride, bool bSaveAssetsInDestinationPath)
+UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, const FString& DestPackagePath, USkeleton* SkeletonOverride, bool bSaveAssetsInDestinationPath, bool bUseHumanoidPipeline, TArray<FString>* OutPipelineErrors)
 {
 	// Use UInterchangeManager directly to avoid AssetTools/ContentBrowser notification
 	// that crashes in commandlet mode (Slate not initialized)
@@ -982,7 +1421,17 @@ UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, co
 	ImportParams.bReplaceExisting = true;
 	ImportParams.DestinationName = FPaths::GetBaseFilename(FilePath);
 
-	if (SkeletonOverride)
+	if (bUseHumanoidPipeline)
+	{
+		USekiroHumanoidImportPipeline* Pipeline = NewObject<USekiroHumanoidImportPipeline>(GetTransientPackage());
+		ImportParams.OverridePipelines.Add(FSoftObjectPath(Pipeline));
+
+		if (OutPipelineErrors)
+		{
+			OutPipelineErrors->Append(Pipeline->GetNormalizationErrors());
+		}
+	}
+	else if (SkeletonOverride)
 	{
 		UInterchangeGenericAssetsPipeline* Pipeline = NewObject<UInterchangeGenericAssetsPipeline>(GetTransientPackage());
 		if (Pipeline->CommonSkeletalMeshesAndAnimationsProperties)
@@ -1040,6 +1489,17 @@ UObject* USekiroImportCommandlet::ImportViaAssetTask(const FString& FilePath, co
 			if (UObject* Asset = AssetData.GetAsset())
 			{
 				SavePackage(Asset);
+			}
+		}
+	}
+
+	if (bUseHumanoidPipeline && OutPipelineErrors)
+	{
+		for (const FSoftObjectPath& PipelinePath : ImportParams.OverridePipelines)
+		{
+			if (USekiroHumanoidImportPipeline* Pipeline = Cast<USekiroHumanoidImportPipeline>(PipelinePath.ResolveObject()))
+			{
+				OutPipelineErrors->Append(Pipeline->GetNormalizationErrors());
 			}
 		}
 	}
