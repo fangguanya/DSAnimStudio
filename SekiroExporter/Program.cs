@@ -401,10 +401,12 @@ namespace SekiroExporter
         static ExportCharacterReport ExportCharacter(string gameDir, string chrBndPath, string chrId, string outputDir,
             Dictionary<string, string> args, ExportSections sections)
         {
-            var report = new ExportCharacterReport { CharacterId = chrId };
-            var assetPackage = new FormalAssetPackageSummary { CharacterId = chrId };
-
             Directory.CreateDirectory(outputDir);
+            string assetPackagePath = Path.Combine(outputDir, "asset_package.json");
+            var assetPackage = TryLoadExistingAssetPackage(assetPackagePath, chrId) ?? new FormalAssetPackageSummary { CharacterId = chrId };
+            var report = new ExportCharacterReport { CharacterId = chrId };
+            SeedReportFromAssetPackage(report, assetPackage);
+
             string modelDir = Path.Combine(outputDir, "Model");
             string animDir = Path.Combine(outputDir, "Animations");
             string texDir = Path.Combine(outputDir, "Textures");
@@ -657,10 +659,12 @@ namespace SekiroExporter
                         report.ModelFileName = Path.GetFileName(actualModelFile);
                         report.FormalSkeletonRoot = ExtractFormalSkeletonRoot(actualModelFile);
                         var modelDeliverable = assetPackage.GetOrAdd("model");
+                        modelDeliverable.FailureReasons.Clear();
                         modelDeliverable.Status = "ready";
                         modelDeliverable.Format = "gltf2";
                         modelDeliverable.RelativePath = Path.Combine("Model", Path.GetFileName(actualModelFile)).Replace('\\', '/');
                         modelDeliverable.FileCount = 1;
+                        modelDeliverable.Files.Clear();
                         modelDeliverable.Files.Add(modelDeliverable.RelativePath);
                         Console.WriteLine($"  ✓ Model: {Path.GetFileName(actualModelFile)} ({new FileInfo(actualModelFile).Length / 1024}KB)");
                     }
@@ -687,10 +691,12 @@ namespace SekiroExporter
                     matExporter.ExportToFile(modelFlvers, matPath);
                     report.MaterialManifestSucceeded = true;
                     var materialDeliverable = assetPackage.GetOrAdd("materialManifest");
+                    materialDeliverable.FailureReasons.Clear();
                     materialDeliverable.Status = "ready";
                     materialDeliverable.Format = "json";
                     materialDeliverable.RelativePath = Path.Combine("Model", Path.GetFileName(matPath)).Replace('\\', '/');
                     materialDeliverable.FileCount = 1;
+                    materialDeliverable.Files.Clear();
                     materialDeliverable.Files.Add(materialDeliverable.RelativePath);
                     Console.WriteLine($"  ✓ Material manifest exported");
                 }
@@ -756,8 +762,10 @@ namespace SekiroExporter
                 report.TextureCount = texCount;
                 report.TexturesSucceeded = exportedTpfCount == tpfDataList.Count && texCount > 0 && report.TextureErrorCount == 0;
                 var textureDeliverable = assetPackage.GetOrAdd("textures");
+                textureDeliverable.FailureReasons.Clear();
                 textureDeliverable.Format = "png";
                 textureDeliverable.FileCount = texCount;
+                textureDeliverable.Files.Clear();
                 foreach (string texturePath in Directory.GetFiles(texDir, "*.png").OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
                     textureDeliverable.Files.Add(Path.Combine("Textures", Path.GetFileName(texturePath)).Replace('\\', '/'));
                 if (report.TexturesSucceeded)
@@ -918,6 +926,7 @@ namespace SekiroExporter
                         && report.MissingAnimationFiles.Count == 0
                         && report.MissingAnimationRootMotionFiles.Count == 0;
                     var animationDeliverable = assetPackage.GetOrAdd("animations");
+                    animationDeliverable.FailureReasons.Clear();
                     animationDeliverable.Format = "gltf2";
                     animationDeliverable.FileCount = exportedAnimationFiles.Count;
                     animationDeliverable.RelativePath = "Animations";
@@ -982,12 +991,15 @@ namespace SekiroExporter
                     report.HasCanonicalSkillConfig = true;
                     report.SkillConfigFileName = Path.GetFileName(skillConfigPath);
                     var skillDeliverable = assetPackage.GetOrAdd("skills");
+                    skillDeliverable.FailureReasons.Clear();
                     skillDeliverable.Status = "ready";
                     skillDeliverable.Format = "json";
                     skillDeliverable.RelativePath = Path.Combine("Skills", Path.GetFileName(skillConfigPath)).Replace('\\', '/');
                     skillDeliverable.FileCount = 1;
+                    skillDeliverable.Files.Clear();
                     skillDeliverable.Files.Add(skillDeliverable.RelativePath);
                     var paramDeliverable = assetPackage.GetOrAdd("params");
+                    paramDeliverable.FailureReasons.Clear();
                     paramDeliverable.Status = report.ParamsSucceeded ? "ready" : "failed";
                     paramDeliverable.Format = "embedded-json";
                     if (!report.ParamsSucceeded)
@@ -1011,20 +1023,25 @@ namespace SekiroExporter
                 report.AddParamError("PARAM_EXPORT_SKIPPED", "Canonical skill parameters were not exported because formal skill export did not complete.");
 
             ValidateFormalMaterialManifestAgainstTextures(outputDir, report, assetPackage);
+            assetPackage.UnexpectedArtifacts.Clear();
             RecordUnexpectedArtifacts(outputDir, assetPackage);
-            assetPackage.FormalSuccess = report.IsSuccessfulFormalExport;
+            assetPackage.FormalSuccess = assetPackage.Deliverables
+                .Where(kvp => kvp.Value.Required)
+                .All(kvp => string.Equals(kvp.Value.Status, "ready", StringComparison.OrdinalIgnoreCase));
 
-            string assetPackagePath = Path.Combine(outputDir, "asset_package.json");
             var assetPackageDeliverable = assetPackage.GetOrAdd("assetPackage");
+            assetPackageDeliverable.FailureReasons.Clear();
             assetPackageDeliverable.Status = "ready";
             assetPackageDeliverable.Format = "json";
             assetPackageDeliverable.RelativePath = "asset_package.json";
             assetPackageDeliverable.FileCount = 1;
+            assetPackageDeliverable.Files.Clear();
             assetPackageDeliverable.Files.Add(assetPackageDeliverable.RelativePath);
             report.AssetPackageFileName = Path.GetFileName(assetPackagePath);
 
             string reportPath = Path.Combine(outputDir, "export_report.json");
             var reportDeliverable = assetPackage.GetOrAdd("report");
+            reportDeliverable.FailureReasons.Clear();
             reportDeliverable.Status = "ready";
             reportDeliverable.Format = "json";
             reportDeliverable.RelativePath = "export_report.json";
@@ -1033,9 +1050,79 @@ namespace SekiroExporter
             reportDeliverable.Files.Add(reportDeliverable.RelativePath);
             File.WriteAllText(assetPackagePath, assetPackage.ToJson().ToString(Newtonsoft.Json.Formatting.Indented));
             File.WriteAllText(reportPath, report.ToJson().ToString(Newtonsoft.Json.Formatting.Indented));
-            Console.WriteLine($"  Report: {Path.GetFileName(reportPath)} {(report.IsSuccessfulFormalExport ? "OK" : "FAILED")}");
+            Console.WriteLine($"  Report: {Path.GetFileName(reportPath)} {(assetPackage.FormalSuccess ? "OK" : "FAILED")}");
 
             return report;
+        }
+
+        static FormalAssetPackageSummary TryLoadExistingAssetPackage(string assetPackagePath, string chrId)
+        {
+            if (!File.Exists(assetPackagePath))
+                return null;
+
+            try
+            {
+                var summary = FormalAssetPackageSummary.FromJson(JObject.Parse(File.ReadAllText(assetPackagePath)));
+                if (!string.Equals(summary.CharacterId, chrId, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  - Existing asset package ignored due to character mismatch: {summary.CharacterId} != {chrId}");
+                    return null;
+                }
+
+                Console.WriteLine($"  - Preserving existing asset package deliverables from {Path.GetFileName(assetPackagePath)}");
+                return summary;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Existing asset package load error: {ex.Message}");
+                return null;
+            }
+        }
+
+        static void SeedReportFromAssetPackage(ExportCharacterReport report, FormalAssetPackageSummary assetPackage)
+        {
+            if (report == null || assetPackage == null)
+                return;
+
+            if (assetPackage.Deliverables.TryGetValue("model", out var modelDeliverable)
+                && string.Equals(modelDeliverable.Status, "ready", StringComparison.OrdinalIgnoreCase))
+            {
+                report.ModelSucceeded = true;
+                report.ModelFileName = Path.GetFileName(modelDeliverable.RelativePath);
+            }
+
+            if (assetPackage.Deliverables.TryGetValue("materialManifest", out var materialDeliverable)
+                && string.Equals(materialDeliverable.Status, "ready", StringComparison.OrdinalIgnoreCase))
+            {
+                report.MaterialManifestSucceeded = true;
+            }
+
+            if (assetPackage.Deliverables.TryGetValue("animations", out var animationDeliverable))
+            {
+                report.AnimationsSucceeded = string.Equals(animationDeliverable.Status, "ready", StringComparison.OrdinalIgnoreCase);
+                report.AnimationCount = Math.Max(report.AnimationCount, animationDeliverable.FileCount);
+                report.ExpectedAnimationCount = Math.Max(report.ExpectedAnimationCount, animationDeliverable.FileCount);
+            }
+
+            if (assetPackage.Deliverables.TryGetValue("textures", out var textureDeliverable))
+            {
+                report.TexturesSucceeded = string.Equals(textureDeliverable.Status, "ready", StringComparison.OrdinalIgnoreCase);
+                report.TextureCount = Math.Max(report.TextureCount, textureDeliverable.FileCount);
+            }
+
+            if (assetPackage.Deliverables.TryGetValue("skills", out var skillDeliverable)
+                && string.Equals(skillDeliverable.Status, "ready", StringComparison.OrdinalIgnoreCase))
+            {
+                report.SkillsSucceeded = true;
+                report.HasCanonicalSkillConfig = true;
+                report.SkillConfigFileName = Path.GetFileName(skillDeliverable.RelativePath);
+            }
+
+            if (assetPackage.Deliverables.TryGetValue("params", out var paramDeliverable)
+                && string.Equals(paramDeliverable.Status, "ready", StringComparison.OrdinalIgnoreCase))
+            {
+                report.ParamsSucceeded = true;
+            }
         }
 
         /// <summary>
@@ -2713,6 +2800,9 @@ namespace SekiroExporter
             string manifestPath = Path.Combine(outputDir, "Model", "material_manifest.json");
             if (!File.Exists(manifestPath))
                 return;
+
+            if (assetPackage.Deliverables.TryGetValue("textures", out var existingTextureDeliverable))
+                existingTextureDeliverable.FailureReasons.Clear();
 
             var manifest = JObject.Parse(File.ReadAllText(manifestPath));
             foreach (JObject material in (manifest["materials"] as JArray)?.OfType<JObject>() ?? Enumerable.Empty<JObject>())

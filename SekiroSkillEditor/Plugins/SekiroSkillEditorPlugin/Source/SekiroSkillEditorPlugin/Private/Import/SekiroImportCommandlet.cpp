@@ -949,12 +949,32 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	const TArray<FString> AnimFilters = ParseCsvPatterns(AnimFilterStr);
 
 	TArray<FString> ValidChrs;
+	TMap<FString, FString> CharacterExportDirs;
 	for (const FString& Dir : ChrDirs)
 	{
 		if (Dir.StartsWith(TEXT("c")) && Dir.Len() >= 4)
 		{
 			if (ChrFilter.Num() == 0 || ChrFilter.Contains(Dir))
+			{
 				ValidChrs.Add(Dir);
+				CharacterExportDirs.Add(Dir, ExportDir / Dir);
+			}
+		}
+	}
+
+	TSharedPtr<FJsonObject> RootAssetPackage;
+	const FString RootAssetPackagePath = ExportDir / TEXT("asset_package.json");
+	if (LoadJsonObjectFromFile(RootAssetPackagePath, RootAssetPackage))
+	{
+		FString RootChrId;
+		if (RootAssetPackage->TryGetStringField(TEXT("characterId"), RootChrId)
+			&& !RootChrId.IsEmpty()
+			&& (ChrFilter.Num() == 0 || ChrFilter.Contains(RootChrId))
+			&& !CharacterExportDirs.Contains(RootChrId))
+		{
+			ValidChrs.Add(RootChrId);
+			CharacterExportDirs.Add(RootChrId, ExportDir);
+			UE_LOG(LogTemp, Display, TEXT("Detected root-level asset package for %s"), *RootChrId);
 		}
 	}
 	ValidChrs.Sort();
@@ -965,7 +985,7 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	{
 		const FString& ChrId = ValidChrs[i];
 		UE_LOG(LogTemp, Display, TEXT("[%d/%d] Importing %s..."), i + 1, ValidChrs.Num(), *ChrId);
-		ImportCharacter(ChrId, ExportDir / ChrId, ContentBase, AnimLimit, AnimFilters, bImportAnimationsOnly, bImportModelOnly);
+		ImportCharacter(ChrId, CharacterExportDirs.FindRef(ChrId), ContentBase, AnimLimit, AnimFilters, bImportAnimationsOnly, bImportModelOnly);
 
 		if ((i + 1) % 5 == 0)
 			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);

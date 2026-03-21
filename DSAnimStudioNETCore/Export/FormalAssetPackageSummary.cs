@@ -31,6 +31,33 @@ namespace DSAnimStudio.Export
                     ["failureReasons"] = new JArray(FailureReasons),
                 };
             }
+
+            public static Deliverable FromJson(string id, JObject json)
+            {
+                if (string.IsNullOrWhiteSpace(id))
+                    throw new ArgumentException("Deliverable id is required.", nameof(id));
+
+                if (json == null)
+                    throw new ArgumentNullException(nameof(json));
+
+                var deliverable = new Deliverable
+                {
+                    Id = id,
+                    Required = (bool?)json["required"] ?? true,
+                    Status = (string)json["status"] ?? "missing",
+                    Format = (string)json["format"] ?? string.Empty,
+                    RelativePath = (string)json["relativePath"] ?? string.Empty,
+                    FileCount = (int?)json["fileCount"] ?? 0,
+                };
+
+                foreach (string file in (json["files"] as JArray)?.Values<string>() ?? Enumerable.Empty<string>())
+                    deliverable.Files.Add(file);
+
+                foreach (string reason in (json["failureReasons"] as JArray)?.Values<string>() ?? Enumerable.Empty<string>())
+                    deliverable.FailureReasons.Add(reason);
+
+                return deliverable;
+            }
         }
 
         public string SchemaVersion { get; init; } = "1.0";
@@ -66,6 +93,34 @@ namespace DSAnimStudio.Export
                 ["deliverables"] = deliverables,
                 ["unexpectedArtifacts"] = new JArray(UnexpectedArtifacts.OrderBy(item => item, StringComparer.Ordinal)),
             };
+        }
+
+        public static FormalAssetPackageSummary FromJson(JObject json)
+        {
+            if (json == null)
+                throw new ArgumentNullException(nameof(json));
+
+            var summary = new FormalAssetPackageSummary
+            {
+                SchemaVersion = (string)json["schemaVersion"] ?? "1.0",
+                CharacterId = (string)json["characterId"],
+                DeliveryMode = (string)json["deliveryMode"] ?? "formal-only",
+                FormalSuccess = (bool?)json["formalSuccess"] ?? false,
+            };
+
+            foreach (string artifact in (json["unexpectedArtifacts"] as JArray)?.Values<string>() ?? Enumerable.Empty<string>())
+                summary.UnexpectedArtifacts.Add(artifact);
+
+            if (json["deliverables"] is JObject deliverables)
+            {
+                foreach (var property in deliverables.Properties().OrderBy(property => property.Name, StringComparer.Ordinal))
+                {
+                    if (property.Value is JObject deliverableJson)
+                        summary.Deliverables[property.Name] = Deliverable.FromJson(property.Name, deliverableJson);
+                }
+            }
+
+            return summary;
         }
     }
 }
