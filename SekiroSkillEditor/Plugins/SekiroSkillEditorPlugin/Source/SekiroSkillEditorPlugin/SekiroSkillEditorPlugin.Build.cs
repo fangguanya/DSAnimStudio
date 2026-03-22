@@ -31,6 +31,8 @@ public class SekiroSkillEditorPlugin : ModuleRules
 			"LevelEditor",
 			"AdvancedPreviewScene",
 			"AnimationBlueprintLibrary",
+			"IKRig",
+			"IKRigEditor",
 			"WorkspaceMenuStructure",
 			"EditorWidgets",
 			"EditorScriptingUtilities",

@@ -132,3 +132,21 @@ SekiroExporter.exe export-all --game-dir "C:\Program Files (x86)\Steam\steamapps
 ```
 "D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" SekiroSkillEditor.uproject -run=SekiroImport -ExportDir=E:\Sekiro\Export -ChrFilter=c0000 -unattended -nopause -nosplash -nullrhi
 ```
+
+### Validate formal imported self-test assets
+```
+"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" SekiroSkillEditor.uproject -ExecutePythonScript=E:\Sekiro\DSAnimStudio\tools\_formal_import_selftest_probe.py -nopause -nosplash
+python E:\Sekiro\DSAnimStudio\tools\validate_formal_import_selftest.py
+```
+
+### Validate Sekiro to Manny retarget pose
+```
+"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" SekiroSkillEditor.uproject -ExecutePythonScript=E:\Sekiro\DSAnimStudio\tools\_retarget_pose_preview_probe.py -nopause -nosplash
+"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" SekiroSkillEditor.uproject -ExecutePythonScript=E:\Sekiro\DSAnimStudio\tools\_retarget_animation_selftest_probe.py -nopause -nosplash
+python E:\Sekiro\DSAnimStudio\tools\validate_retarget_pose_diagnostic.py
+```
+
+### Validate host-side threshold logic
+```
+python E:\Sekiro\DSAnimStudio\tools\test_formal_validation.py
+```

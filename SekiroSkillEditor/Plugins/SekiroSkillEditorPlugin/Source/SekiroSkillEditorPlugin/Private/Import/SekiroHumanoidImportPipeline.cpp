@@ -101,13 +101,15 @@ namespace
 		const FMatrix SourceBasis = FRotationMatrix::MakeFromXZ(LateralAxis, UpAxis);
 		const FMatrix BasisCorrection = SourceBasis.InverseFast();
 		const FScaleMatrix MirrorX(FVector(-1.0, 1.0, 1.0));
-		OutMatrix = BasisCorrection * MirrorX;
+		const FMatrix ObjectSpaceYaw180 = FRotationMatrix(FRotator(0.0, 180.0, 0.0));
+		OutMatrix = BasisCorrection * MirrorX * ObjectSpaceYaw180;
 		auto MatrixRowToString = [&OutMatrix](int32 RowIndex)
 		{
 			return FString::Printf(TEXT("X=%0.6f Y=%0.6f Z=%0.6f W=%0.6f"), OutMatrix.M[RowIndex][0], OutMatrix.M[RowIndex][1], OutMatrix.M[RowIndex][2], OutMatrix.M[RowIndex][3]);
 		};
 		UE_LOG(LogTemp, Display, TEXT("SekiroHumanoidImport: source bind Left=%s Right=%s Pelvis=%s Head=%s LateralAxis=%s UpAxis=%s"),
 			*Left.ToString(), *Right.ToString(), *Pelvis.ToString(), *Head.ToString(), *LateralAxis.ToString(), *UpAxis.ToString());
+		UE_LOG(LogTemp, Display, TEXT("SekiroHumanoidImport: appended final object-space yaw correction of 180 degrees around UE Z"));
 		UE_LOG(LogTemp, Display, TEXT("SekiroHumanoidImport: normalization matrix rows=[%s] [%s] [%s] [%s]"),
 			*MatrixRowToString(0),
 			*MatrixRowToString(1),
@@ -137,27 +139,7 @@ namespace
 		SetParent(TEXT("UpperChest"), ResolveExistingBone(BoneNames, { TEXT("Chest"), TEXT("Spine2"), TEXT("Spine1") }));
 		SetParent(TEXT("Neck"), ResolveExistingBone(BoneNames, { TEXT("UpperChest"), TEXT("Chest"), TEXT("Spine2"), TEXT("Spine1") }));
 		SetParent(TEXT("Head"), ResolveExistingBone(BoneNames, { TEXT("Neck") }));
-
-		const FString ArmRoot = ResolveExistingBone(BoneNames, { TEXT("UpperChest"), TEXT("Chest"), TEXT("Spine2"), TEXT("Spine1") });
-		SetParent(TEXT("L_Shoulder"), ArmRoot);
-		SetParent(TEXT("L_UpperArm"), ResolveExistingBone(BoneNames, { TEXT("L_Shoulder") }));
-		SetParent(TEXT("L_Forearm"), ResolveExistingBone(BoneNames, { TEXT("L_UpperArm") }));
-		SetParent(TEXT("L_Hand"), ResolveExistingBone(BoneNames, { TEXT("L_Forearm") }));
-
-		SetParent(TEXT("R_Shoulder"), ArmRoot);
-		SetParent(TEXT("R_UpperArm"), ResolveExistingBone(BoneNames, { TEXT("R_Shoulder") }));
-		SetParent(TEXT("R_Forearm"), ResolveExistingBone(BoneNames, { TEXT("R_UpperArm") }));
-		SetParent(TEXT("R_Hand"), ResolveExistingBone(BoneNames, { TEXT("R_Forearm") }));
-
-		SetParent(TEXT("L_Thigh"), ResolveExistingBone(BoneNames, { TEXT("Pelvis") }));
-		SetParent(TEXT("L_Calf"), ResolveExistingBone(BoneNames, { TEXT("L_Thigh") }));
-		SetParent(TEXT("L_Foot"), ResolveExistingBone(BoneNames, { TEXT("L_Calf") }));
-		SetParent(TEXT("L_Toe0"), ResolveExistingBone(BoneNames, { TEXT("L_Foot") }));
-
-		SetParent(TEXT("R_Thigh"), ResolveExistingBone(BoneNames, { TEXT("Pelvis") }));
-		SetParent(TEXT("R_Calf"), ResolveExistingBone(BoneNames, { TEXT("R_Thigh") }));
-		SetParent(TEXT("R_Foot"), ResolveExistingBone(BoneNames, { TEXT("R_Calf") }));
-		SetParent(TEXT("R_Toe0"), ResolveExistingBone(BoneNames, { TEXT("R_Foot") }));
+		SetParent(TEXT("face_root"), ResolveExistingBone(BoneNames, { TEXT("Head"), TEXT("Neck") }));
 	}
 
 	static FMatrix ComputeNormalizedWorldMatrix(
@@ -177,6 +159,222 @@ namespace
 		return NormalizedWorldMatrix;
 	}
 
+	static bool TryGetNormalizedWorldLocation(const FSekiroHumanoidNormalizationData& Data, const FString& BoneName, FVector& OutLocation)
+	{
+		if (const FSekiroHumanoidSceneNodeData* BoneData = Data.BoneDataByName.Find(BoneName))
+		{
+			OutLocation = BoneData->NormalizedGlobalBindTransform.GetLocation();
+			return true;
+		}
+
+		return false;
+	}
+
+	static void BuildChildBonesByParent(const TMap<FString, FSekiroHumanoidSceneNodeData>& BoneDataByName, TMap<FString, TArray<FString>>& OutChildBonesByParent)
+	{
+		OutChildBonesByParent.Reset();
+		for (const TPair<FString, FSekiroHumanoidSceneNodeData>& Pair : BoneDataByName)
+		{
+			const FString& ParentBoneName = Pair.Value.ParentBoneName;
+			if (!ParentBoneName.IsEmpty())
+			{
+				OutChildBonesByParent.FindOrAdd(ParentBoneName).Add(Pair.Key);
+			}
+		}
+	}
+
+	static void ApplyComponentRotationRebaseToSubtree(
+		const FString& RootBoneName,
+		const FQuat& RotationDelta,
+		const TMap<FString, TArray<FString>>& ChildBonesByParent,
+		TMap<FString, FTransform>& InOutWorldByBone)
+	{
+		FTransform* RootWorldTransform = InOutWorldByBone.Find(RootBoneName);
+		if (!RootWorldTransform)
+		{
+			return;
+		}
+
+		const FVector PivotLocation = RootWorldTransform->GetLocation();
+		TArray<FString> BoneStack = { RootBoneName };
+		while (!BoneStack.IsEmpty())
+		{
+			const FString BoneName = BoneStack.Pop(EAllowShrinking::No);
+			if (FTransform* BoneWorldTransform = InOutWorldByBone.Find(BoneName))
+			{
+				BoneWorldTransform->SetRotation((RotationDelta * BoneWorldTransform->GetRotation()).GetNormalized());
+				if (BoneName != RootBoneName)
+				{
+					const FVector RelativeLocation = BoneWorldTransform->GetLocation() - PivotLocation;
+					BoneWorldTransform->SetLocation(PivotLocation + RotationDelta.RotateVector(RelativeLocation));
+				}
+			}
+
+			if (const TArray<FString>* ChildBones = ChildBonesByParent.Find(BoneName))
+			{
+				for (const FString& ChildBoneName : *ChildBones)
+				{
+					BoneStack.Add(ChildBoneName);
+				}
+			}
+		}
+	}
+
+	static void ApplyComponentRotationRebasesToWorldMap(const FSekiroHumanoidNormalizationData& Data, TMap<FString, FTransform>& InOutWorldByBone)
+	{
+		TMap<FString, TArray<FString>> ChildBonesByParent;
+		BuildChildBonesByParent(Data.BoneDataByName, ChildBonesByParent);
+		for (const TPair<FString, FQuat>& Pair : Data.ComponentRotationRebaseByBone)
+		{
+			ApplyComponentRotationRebaseToSubtree(Pair.Key, Pair.Value, ChildBonesByParent, InOutWorldByBone);
+		}
+	}
+
+	static void RebuildNormalizedLocalAndGlobalFromWorldMap(FSekiroHumanoidNormalizationData& Data, const TMap<FString, FTransform>& WorldByBone, TArray<FString>& OutErrors)
+	{
+		for (const FString& BoneName : Data.BoneOrder)
+		{
+			FSekiroHumanoidSceneNodeData* BoneData = Data.BoneDataByName.Find(BoneName);
+			if (!BoneData)
+			{
+				continue;
+			}
+
+			const FTransform* BoneWorldTransform = WorldByBone.Find(BoneName);
+			if (!BoneWorldTransform)
+			{
+				OutErrors.Add(FString::Printf(TEXT("normalized world transform for bone '%s' was missing during bind reconstruction"), *BoneName));
+				return;
+			}
+
+			const FString SelectedParentName = Data.TargetParentByBone.Contains(BoneName)
+				? Data.TargetParentByBone[BoneName]
+				: BoneData->ParentBoneName;
+			BoneData->NormalizedParentBoneName = SelectedParentName;
+
+			FTransform LocalTransform = *BoneWorldTransform;
+			if (!SelectedParentName.IsEmpty())
+			{
+				const FTransform* ParentWorldTransform = WorldByBone.Find(SelectedParentName);
+				if (!ParentWorldTransform)
+				{
+					OutErrors.Add(FString::Printf(TEXT("normalized bind pose parent '%s' for bone '%s' was not present during bind reconstruction"), *SelectedParentName, *BoneName));
+					return;
+				}
+
+				LocalTransform = FTransform(BoneWorldTransform->ToMatrixWithScale() * ParentWorldTransform->ToMatrixWithScale().InverseFast());
+			}
+
+			BoneData->NormalizedGlobalBindTransform = *BoneWorldTransform;
+			BoneData->NormalizedLocalBindTransform = LocalTransform;
+		}
+	}
+
+	static void BuildHandComponentRotationRebases(FSekiroHumanoidNormalizationData& Data)
+	{
+		struct FHandRebaseSpec
+		{
+			const TCHAR* HandBone;
+			const TCHAR* IndexBone;
+			const TCHAR* MiddleBone;
+			const TCHAR* PinkyBone;
+			bool bFlipForward;
+			bool bFlipLateral;
+		};
+
+		static const FHandRebaseSpec Specs[] = {
+			{ TEXT("L_Hand"), TEXT("L_Finger1"), TEXT("L_Finger2"), TEXT("L_Finger4"), false, true },
+			{ TEXT("R_Hand"), TEXT("R_Finger1"), TEXT("R_Finger2"), TEXT("R_Finger4"), false, false },
+		};
+
+		Data.ComponentRotationRebaseByBone.Reset();
+		for (const FHandRebaseSpec& Spec : Specs)
+		{
+			FVector HandLocation = FVector::ZeroVector;
+			FVector IndexLocation = FVector::ZeroVector;
+			FVector MiddleLocation = FVector::ZeroVector;
+			FVector PinkyLocation = FVector::ZeroVector;
+			if (!TryGetNormalizedWorldLocation(Data, Spec.HandBone, HandLocation)
+				|| !TryGetNormalizedWorldLocation(Data, Spec.IndexBone, IndexLocation)
+				|| !TryGetNormalizedWorldLocation(Data, Spec.MiddleBone, MiddleLocation)
+				|| !TryGetNormalizedWorldLocation(Data, Spec.PinkyBone, PinkyLocation))
+			{
+				continue;
+			}
+
+			FVector PalmForward = (MiddleLocation - HandLocation).GetSafeNormal();
+			const FVector PalmLateralSeed = (IndexLocation - PinkyLocation).GetSafeNormal();
+			const FVector PalmNormal = FVector::CrossProduct(PalmForward, PalmLateralSeed).GetSafeNormal();
+			FVector PalmLateral = FVector::CrossProduct(PalmNormal, PalmForward).GetSafeNormal();
+			if (Spec.bFlipForward)
+			{
+				PalmForward *= -1.0;
+			}
+			if (Spec.bFlipLateral)
+			{
+				PalmLateral *= -1.0;
+			}
+			if (PalmForward.IsNearlyZero() || PalmLateral.IsNearlyZero() || PalmNormal.IsNearlyZero())
+			{
+				continue;
+			}
+
+			const FQuat DesiredComponentRotation = FRotationMatrix::MakeFromXY(PalmForward, PalmLateral).ToQuat();
+			if (FSekiroHumanoidSceneNodeData* HandBoneData = Data.BoneDataByName.Find(Spec.HandBone))
+			{
+				const FQuat CurrentComponentRotation = HandBoneData->NormalizedGlobalBindTransform.GetRotation();
+				const FQuat ComponentRotationRebase = (DesiredComponentRotation * CurrentComponentRotation.Inverse()).GetNormalized();
+				Data.ComponentRotationRebaseByBone.Add(Spec.HandBone, ComponentRotationRebase);
+			}
+		}
+	}
+
+	static bool BuildNormalizedBindPoseData(FSekiroHumanoidNormalizationData& Data, TArray<FString>& OutErrors)
+	{
+		TMap<FString, FMatrix> NormalizedWorldMatrices;
+		for (const FString& BoneName : Data.BoneOrder)
+		{
+			if (!Data.BoneDataByName.Contains(BoneName))
+			{
+				continue;
+			}
+
+			ComputeNormalizedWorldMatrix(BoneName, Data, NormalizedWorldMatrices);
+		}
+
+		TMap<FString, FTransform> NormalizedWorldByBone;
+		for (const FString& BoneName : Data.BoneOrder)
+		{
+			if (const FMatrix* BoneWorldMatrix = NormalizedWorldMatrices.Find(BoneName))
+			{
+				NormalizedWorldByBone.Add(BoneName, FTransform(*BoneWorldMatrix));
+			}
+		}
+
+		RebuildNormalizedLocalAndGlobalFromWorldMap(Data, NormalizedWorldByBone, OutErrors);
+		if (OutErrors.Num() > 0)
+		{
+			return false;
+		}
+
+		BuildHandComponentRotationRebases(Data);
+		ApplyComponentRotationRebasesToWorldMap(Data, NormalizedWorldByBone);
+		RebuildNormalizedLocalAndGlobalFromWorldMap(Data, NormalizedWorldByBone, OutErrors);
+		if (OutErrors.Num() > 0)
+		{
+			return false;
+		}
+
+		Data.NormalizedMeshBindTransformByMeshUid.Reset();
+		for (const TPair<FString, FTransform>& Pair : Data.MeshBindTransformByMeshUid)
+		{
+			const FMatrix NormalizedMeshBindMatrix = Pair.Value.ToMatrixWithScale() * Data.GlobalNormalizationMatrix;
+			Data.NormalizedMeshBindTransformByMeshUid.Add(Pair.Key, FTransform(NormalizedMeshBindMatrix));
+		}
+
+		return true;
+	}
+
 	static void ApplyNormalizedHierarchy(UInterchangeBaseNodeContainer* BaseNodeContainer, const FSekiroHumanoidNormalizationData& Data, TArray<FString>& OutErrors)
 	{
 		TMap<FString, const UInterchangeSceneNode*> SceneNodesByBoneName;
@@ -189,7 +387,7 @@ namespace
 		TMap<FString, FMatrix> MeshBindReferenceByUid;
 		for (const FString& MeshUid : Data.SkinnedMeshAssetUids)
 		{
-			if (const FTransform* MeshBindTransform = Data.MeshBindTransformByMeshUid.Find(MeshUid))
+			if (const FTransform* MeshBindTransform = Data.NormalizedMeshBindTransformByMeshUid.Find(MeshUid))
 			{
 				MeshBindReferenceByUid.Add(MeshUid, MeshBindTransform->ToMatrixWithScale());
 			}
@@ -212,7 +410,7 @@ namespace
 			}
 
 			const FSekiroHumanoidSceneNodeData& BoneData = Data.BoneDataByName[BoneName];
-			const FMatrix BoneWorldMatrix = ComputeNormalizedWorldMatrix(BoneName, Data, NormalizedWorldMatrices);
+			const FMatrix BoneWorldMatrix = BoneData.NormalizedGlobalBindTransform.ToMatrixWithScale();
 			FString SelectedParentName;
 			bool bParentExplicitlyRewritten = false;
 			if (const FString* TargetParentName = Data.TargetParentByBone.Find(BoneName))
@@ -225,15 +423,13 @@ namespace
 				SelectedParentName = BoneData.ParentBoneName;
 			}
 
-			FMatrix LocalMatrix = BoneWorldMatrix;
+			FMatrix LocalMatrix = BoneData.NormalizedLocalBindTransform.ToMatrixWithScale();
 
 			if (!SelectedParentName.IsEmpty())
 			{
 				const UInterchangeSceneNode* ParentSceneNode = SceneNodesByBoneName.FindRef(SelectedParentName);
 				if (ParentSceneNode)
 				{
-					const FMatrix ParentWorldMatrix = ComputeNormalizedWorldMatrix(SelectedParentName, Data, NormalizedWorldMatrices);
-					LocalMatrix = BoneWorldMatrix * ParentWorldMatrix.InverseFast();
 					BaseNodeContainer->SetNodeParentUid(SceneNode->GetUniqueID(), ParentSceneNode->GetUniqueID());
 					if (bParentExplicitlyRewritten)
 					{
@@ -260,16 +456,16 @@ namespace
 			const FTransform LocalTransform(LocalMatrix);
 			SceneNode->SetDisplayLabel(BoneName);
 			SceneNode->SetCustomLocalTransform(BaseNodeContainer, LocalTransform, false);
-			SceneNode->SetCustomBindPoseLocalTransform(BaseNodeContainer, BoneData.LocalBindTransform, false);
+			SceneNode->SetCustomBindPoseLocalTransform(BaseNodeContainer, LocalTransform, false);
 			SceneNode->SetCustomTimeZeroLocalTransform(BaseNodeContainer, LocalTransform, false);
-			SceneNode->SetCustomHasBindPose(false);
+			SceneNode->SetCustomHasBindPose(true);
 			SceneNode->SetCustomGlobalMatrixForT0Rebinding(BoneWorldMatrix);
 			SceneNode->SetGlobalBindPoseReferenceForMeshUIDs(MeshBindReferenceByUid);
 
 			for (const FString& MeshUid : Data.SkinnedMeshAssetUids)
 			{
 				const FString AttributeKey = TEXT("JointBindPosePerMesh_") + MeshUid;
-				SceneNode->RegisterAttribute<FMatrix>(UE::Interchange::FAttributeKey(AttributeKey), BoneData.GlobalBindTransform.ToMatrixWithScale());
+				SceneNode->RegisterAttribute<FMatrix>(UE::Interchange::FAttributeKey(AttributeKey), BoneWorldMatrix);
 			}
 		}
 
@@ -396,6 +592,10 @@ bool SekiroHumanoidImport::BuildNormalizationData(
 	OutData.RootBoneName = ResolveExistingBone(BoneNames, { TEXT("Master"), TEXT("Root"), TEXT("root"), TEXT("Pelvis") });
 	ResolveTargetParents(BoneNames, OutData.TargetParentByBone);
 	if (!BuildGlobalNormalizationMatrix(OutData.BoneDataByName, OutData.GlobalNormalizationMatrix, OutErrors))
+	{
+		return false;
+	}
+	if (!BuildNormalizedBindPoseData(OutData, OutErrors))
 	{
 		return false;
 	}

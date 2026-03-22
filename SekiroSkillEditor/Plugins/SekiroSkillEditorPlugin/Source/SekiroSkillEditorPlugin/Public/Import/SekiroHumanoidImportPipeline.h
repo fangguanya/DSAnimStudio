@@ -15,6 +15,9 @@ struct FSekiroHumanoidSceneNodeData
 	FString ParentBoneName;
 	FTransform LocalBindTransform = FTransform::Identity;
 	FTransform GlobalBindTransform = FTransform::Identity;
+	FString NormalizedParentBoneName;
+	FTransform NormalizedLocalBindTransform = FTransform::Identity;
+	FTransform NormalizedGlobalBindTransform = FTransform::Identity;
 };
 
 struct FSekiroHumanoidNormalizationData
@@ -26,7 +29,9 @@ struct FSekiroHumanoidNormalizationData
 	TArray<FString> SkinnedMeshAssetUids;
 	TMap<FString, FString> BoneNameByNodeUid;
 	TMap<FString, FString> TargetParentByBone;
+	TMap<FString, FQuat> ComponentRotationRebaseByBone;
 	TMap<FString, FTransform> MeshBindTransformByMeshUid;
+	TMap<FString, FTransform> NormalizedMeshBindTransformByMeshUid;
 	TMap<FString, FSekiroHumanoidSceneNodeData> BoneDataByName;
 };
 
