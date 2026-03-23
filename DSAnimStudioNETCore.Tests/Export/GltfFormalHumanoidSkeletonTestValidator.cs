@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using DSAnimStudio.Export;
 using Newtonsoft.Json.Linq;
-using Matrix4x4 = System.Numerics.Matrix4x4;
 using Quaternion = System.Numerics.Quaternion;
 using Vector3 = System.Numerics.Vector3;
+using Matrix4x4 = System.Numerics.Matrix4x4;
 
-namespace DSAnimStudio.Export
+namespace DSAnimStudioNETCore.Tests.Export
 {
     internal static class GltfFormalHumanoidSkeletonValidator
     {
@@ -91,21 +92,15 @@ namespace DSAnimStudio.Export
 
             float upScore = Vector3.Dot(metrics.UpDirection, Vector3.UnitY);
             if (upScore < DirectionThreshold)
-            {
                 failures.Add($"Expected head/up +Y, got {FormatVector(metrics.UpDirection)} (score {upScore:F3})");
-            }
 
             float faceScore = Vector3.Dot(metrics.FaceDirection, Vector3.UnitZ);
             if (faceScore < DirectionThreshold)
-            {
                 failures.Add($"Expected face +Z, got {FormatVector(metrics.FaceDirection)} (score {faceScore:F3})");
-            }
 
             float rightHandScore = Vector3.Dot(metrics.RightHandDirection, Vector3.UnitX);
             if (rightHandScore < DirectionThreshold)
-            {
                 failures.Add($"Expected R_Hand toward +X, got {FormatVector(metrics.RightHandDirection)} (score {rightHandScore:F3})");
-            }
 
             if (failures.Count > 0)
             {

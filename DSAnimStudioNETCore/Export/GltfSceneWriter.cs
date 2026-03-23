@@ -412,7 +412,7 @@ namespace DSAnimStudio.Export
                         weightedJointNames.Add(bone.Name);
 
                     if (!exactInverseBindMatrices.ContainsKey(bone.Name))
-                        exactInverseBindMatrices.Add(bone.Name, AssimpExportTransformUtils.ToNumericsMatrix(bone.OffsetMatrix));
+                        exactInverseBindMatrices.Add(bone.Name, FormalSceneExportShared.ToNumericsMatrix(bone.OffsetMatrix));
                 }
             }
 
@@ -774,9 +774,6 @@ namespace DSAnimStudio.Export
                         throw new InvalidOperationException($"Formal animation channel targets node '{GetNodeName(nodes, nodeIndex)}' ({nodeIndex}) outside the declared formal skeleton hierarchy.");
                 }
             }
-
-            if (GltfFormalHumanoidSkeletonValidator.ShouldValidate(root, expectedSkeletonRootName))
-                GltfFormalHumanoidSkeletonValidator.Validate(root, gltfPath, expectedSkeletonRootName);
         }
 
         private static Dictionary<int, int> BuildParentMap(JArray nodes)
@@ -914,7 +911,7 @@ namespace DSAnimStudio.Export
                     if (sourceNode == null)
                         return;
 
-                    Matrix4x4 sourceLocal = AssimpExportTransformUtils.ToNumericsMatrix(sourceNode.Transform);
+                    Matrix4x4 sourceLocal = FormalSceneExportShared.ToNumericsMatrix(sourceNode.Transform);
                     Matrix4x4 effectiveLocal = inheritedWrapperTransform * sourceLocal;
                     bool isWrapper = sourceNode.MeshIndices.Count == 0
                         && (string.IsNullOrWhiteSpace(sourceNode.Name)

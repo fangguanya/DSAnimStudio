@@ -266,8 +266,6 @@ namespace SekiroExporter
                         return RunExportTextures(parsedArgs);
                     case "export-skills":
                         return RunExportSkills(parsedArgs);
-                    case "convert-to-fbx":
-                        return RunConvertToFbx(parsedArgs);
                     default:
                         Console.Error.WriteLine($"Unknown command: {command}");
                         PrintUsage();
@@ -1290,17 +1288,6 @@ namespace SekiroExporter
             if (!File.Exists(path))
                 throw new FileNotFoundException($"Character file not found: {path}");
             return path;
-        }
-
-        static int RunConvertToFbx(Dictionary<string, string> args)
-        {
-            string dir = args.GetValueOrDefault("output") ?? args.GetValueOrDefault("dir") ?? "E:\\Sekiro\\Export";
-            bool delete = args.ContainsKey("delete-originals");
-
-            Console.WriteLine($"Converting DAE files to FBX in: {dir}");
-            int converted = DaeToFbxConverter.ConvertDirectory(dir, delete);
-            Console.WriteLine($"Done. {converted} files converted.");
-            return 0;
         }
         static FLVER2 TryReadFirstFlverFromBinder(string binderPath)
         {
