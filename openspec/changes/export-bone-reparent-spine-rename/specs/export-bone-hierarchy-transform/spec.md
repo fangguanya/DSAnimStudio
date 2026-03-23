@@ -33,19 +33,16 @@
 - **当** 新 parent 骨骼的 local transform 矩阵不可逆（退化矩阵）
 - **那么** 必须保留该骨骼的原始 local transform 并记录错误警告，禁止导出崩溃
 
-### 需求:Reparent 后的 inverse bind matrix 必须基于新的 parent chain
-mesh skinning 中的 inverse bind matrix 必须使用 reparented 后的 parent chain 计算 world matrix，而非原始 parent chain。
+### 需求:Inverse bind matrix 必须从 Skeleton 节点树计算
+mesh skinning 中的 inverse bind matrix 必须从已构建的 Assimp skeleton 节点树（由 HKX 或 FLVER 构建的同一数据源）计算世界矩阵，禁止从 FLVER.Nodes 独立计算。这确保 IBM 与 skeleton hierarchy 使用完全相同的数据源，消除 FLVER/HKX bind pose 差异导致的蒙皮偏移。
 
 #### 场景:蒙皮骨骼的 offset matrix 一致性
-- **当** 导出包含蒙皮 mesh 的模型，且其中存在被 reparent 的骨骼
-- **那么** 每个 bone 的 `OffsetMatrix`（inverse bind matrix）必须等于 `inverse(newWorldMatrix)`，其中 `newWorldMatrix` 沿新 parent chain 计算
+- **当** 导出包含蒙皮 mesh 的模型
+- **那么** 每个 bone 的 `OffsetMatrix`（inverse bind matrix）必须等于 `inverse(worldMatrix)`，其中 `worldMatrix` 从 skeleton 节点树逐级累乘 local transform 得到，禁止从 FLVER.Nodes 的 parent chain 独立计算
 
-### 需求:骨骼变换必须统一作用于 FLVER 和 HKX 两条路径
-无论 skeleton 数据来源是 FLVER.Nodes 还是 HKX.HKASkeleton，骨骼变换（reparent + rename + transform 重算）必须产生完全一致的结果。禁止只在一条路径中应用变换而遗漏另一条。
-
-#### 场景:HKX skeleton 路径下的一致性
-- **当** 导出使用 HKX skeleton 作为骨架来源
-- **那么** 导出的骨骼层级、骨骼名和 local transform 必须与使用 FLVER skeleton 路径时完全一致（在 bind pose 部分）
+#### 场景:FLVER 与 HKX bind pose 存在差异的骨骼
+- **当** 某骨骼的 FLVER bind pose 与 HKX bind pose 不一致（如 RootRotY/RootRotXZ 等纯旋转控制骨骼）
+- **那么** IBM 必须以 skeleton 节点树的世界矩阵为准，不得使用 FLVER 的世界矩阵
 
 ### 需求:骨骼变换必须在坐标系转换之前应用
 所有骨骼变换（reparent、rename、local transform 重算）必须在 source 空间中完成，然后再经过 `ConvertSourceMatrixToGltf()` 转换到 glTF 空间。禁止在 glTF 空间中执行 reparent 矩阵计算。

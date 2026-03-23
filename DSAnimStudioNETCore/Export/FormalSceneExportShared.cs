@@ -735,7 +735,14 @@ namespace DSAnimStudio.Export
                     continue;
 
                 var bone = new Bone { Name = boneName };
+
+                // Prefer skeleton node tree for world matrix (ensures IBM matches skeleton hierarchy).
+                // Falls back to FLVER parent chain if node not found.
+                // Note: the OffsetMatrix here is a hint for Assimp. The final IBM written to glTF
+                // is always recomputed from the skeleton node graph in GltfSceneWriter.BuildSkinContext
+                // to ensure consistency with the skeleton hierarchy (avoiding FLVER/HKX bind pose mismatches).
                 var worldMatrix = ComputeWorldMatrix(flver.Nodes, globalBoneIdx, scaleFactor);
+
                 Matrix4x4.Invert(worldMatrix, out var inverseWorld);
                 bone.OffsetMatrix = ToAssimpMatrix(inverseWorld);
                 bone.VertexWeights.AddRange(weights);
@@ -783,6 +790,36 @@ namespace DSAnimStudio.Export
                     meshIdx++;
                 }
             }
+        }
+
+        /// <summary>
+        /// Computes the world matrix for an Assimp node by walking up the node tree.
+        /// Returns the matrix in Numerics format (same space as the node transforms, i.e. glTF space).
+        /// </summary>
+        public static Matrix4x4 ComputeAssimpNodeWorldMatrix(Node node)
+        {
+            var result = Matrix4x4.Identity;
+            var current = node;
+            while (current != null)
+            {
+                result *= ToNumericsMatrix(current.Transform);
+                current = current.Parent;
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Builds a name-to-node lookup from the skeleton bone node list.
+        /// </summary>
+        public static Dictionary<string, Node> BuildBoneNodeMap(IReadOnlyList<Node> boneNodes)
+        {
+            var map = new Dictionary<string, Node>(StringComparer.Ordinal);
+            foreach (var node in boneNodes)
+            {
+                if (node != null && !string.IsNullOrEmpty(node.Name))
+                    map[node.Name] = node;
+            }
+            return map;
         }
 
         /// <summary>

@@ -460,7 +460,20 @@ namespace DSAnimStudio.Export
                     continue;
                 }
 
-                if (!Matrix4x4.Invert(worldMatrices[jointIndex], out Matrix4x4 computedInverseBind))
+                // Ancestor joints without direct vertex weights: compute IBM from the graph.
+                // Use the same row-vector convention as ComputeWorldMatrix (child *= parent)
+                // by walking up the parent chain and accumulating local transforms.
+                Matrix4x4 worldRv = Matrix4x4.Identity;
+                int current = jointIndex;
+                while (true)
+                {
+                    worldRv *= graph.Nodes[current].LocalTransform;
+                    if (!graph.ParentByIndex.TryGetValue(current, out int parentIdx))
+                        break;
+                    current = parentIdx;
+                }
+
+                if (!Matrix4x4.Invert(worldRv, out Matrix4x4 computedInverseBind))
                     throw new InvalidOperationException($"Failed to compute inverse bind matrix for joint '{jointName}'.");
 
                 inverseBindMatrices.Add(computedInverseBind);
