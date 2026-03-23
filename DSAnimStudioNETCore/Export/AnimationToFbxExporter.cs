@@ -90,7 +90,8 @@ namespace DSAnimStudio.Export
                 throw new InvalidOperationException($"No HKASkeleton found in skeleton HKX. Objects: [{string.Join(", ", types)}]");
             }
 
-            var boneNodes = FormalSceneExportShared.BuildSkeletonHierarchyFromHkx(skeleton, scene.RootNode, _options.ScaleFactor);
+            var boneNodes = FormalSceneExportShared.BuildSkeletonHierarchyFromHkx(skeleton, scene.RootNode, _options.ScaleFactor,
+                out var modifiedNames, out var modifiedParentIndices, out _);
             FormalSceneExportShared.LogSkeletonSelfCheck("HKX", boneNodes);
             string formalSkeletonRootName = FormalSceneExportShared.ResolveFormalSkeletonRootName(boneNodes, scene.RootNode, "animation");
 
@@ -103,7 +104,7 @@ namespace DSAnimStudio.Export
 
             FormalSceneExportShared.AppendSceneMeshes(scene, sceneFlvers, sceneBoneNames, _options.ScaleFactor);
 
-            var anim = BuildAnimation(skeleton, animData, animName, animData.RootMotion);
+            var anim = BuildAnimation(skeleton, animData, animName, animData.RootMotion, modifiedNames, modifiedParentIndices);
             if (anim != null)
                 scene.Animations.Add(anim);
 
@@ -311,7 +312,8 @@ namespace DSAnimStudio.Export
         /// </summary>
         internal Animation BuildAnimation(HKX.HKASkeleton skeleton,
             HavokAnimationData animData, string animName,
-            RootMotionData rootMotion)
+            RootMotionData rootMotion,
+            string[] modifiedNames = null, short[] modifiedParentIndices = null)
         {
             var anim = new Animation
             {
@@ -326,17 +328,35 @@ namespace DSAnimStudio.Export
             anim.DurationInTicks = frameCount;
 
             float scale = _options.ScaleFactor;
+            int boneCount = (int)skeleton.Bones.Size;
 
-            for (int boneIdx = 0; boneIdx < (int)skeleton.Bones.Size; boneIdx++)
+            // Detect which bones were reparented by comparing modified vs original parent indices
+            var reparentedNewParent = new int[boneCount];
+            for (int i = 0; i < boneCount; i++)
+                reparentedNewParent[i] = -1; // -1 = not reparented
+
+            if (modifiedParentIndices != null)
             {
-                var boneName = skeleton.Bones[boneIdx].Name.GetString();
-                if (string.IsNullOrEmpty(boneName))
-                    boneName = $"Bone_{boneIdx}";
+                for (int i = 0; i < boneCount && i < modifiedParentIndices.Length; i++)
+                {
+                    if (modifiedParentIndices[i] != skeleton.ParentIndices[i].data)
+                        reparentedNewParent[i] = modifiedParentIndices[i];
+                }
+            }
+
+            for (int boneIdx = 0; boneIdx < boneCount; boneIdx++)
+            {
+                string channelName = (modifiedNames != null && boneIdx < modifiedNames.Length)
+                    ? modifiedNames[boneIdx]
+                    : (skeleton.Bones[boneIdx].Name.GetString() ?? $"Bone_{boneIdx}");
 
                 var channel = new NodeAnimationChannel
                 {
-                    NodeName = boneName,
+                    NodeName = channelName,
                 };
+
+                bool needsRecalc = reparentedNewParent[boneIdx] >= 0;
+                int newParentIdx = reparentedNewParent[boneIdx];
 
                 for (int frame = 0; frame <= frameCount; frame++)
                 {
@@ -370,6 +390,29 @@ namespace DSAnimStudio.Export
                                 transform.Rotation.W))
                             * Matrix4x4.CreateTranslation(translation);
 
+                        // For reparented bones: newLocal = oldLocal * inv(newParentLocal) [row-vector]
+                        if (needsRecalc && newParentIdx >= 0)
+                        {
+                            var parentTransform = animData.GetTransformOnFrameByBone(newParentIdx, frame, false);
+                            var parentTranslation = new Vector3(
+                                parentTransform.Translation.X * scale,
+                                parentTransform.Translation.Y * scale,
+                                parentTransform.Translation.Z * scale);
+                            var parentSourceMatrix = Matrix4x4.CreateScale(
+                                    parentTransform.Scale.X,
+                                    parentTransform.Scale.Y,
+                                    parentTransform.Scale.Z)
+                                * Matrix4x4.CreateFromQuaternion(new Quaternion(
+                                    parentTransform.Rotation.X,
+                                    parentTransform.Rotation.Y,
+                                    parentTransform.Rotation.Z,
+                                    parentTransform.Rotation.W))
+                                * Matrix4x4.CreateTranslation(parentTranslation);
+
+                            if (Matrix4x4.Invert(parentSourceMatrix, out var invParent))
+                                sourceMatrix = sourceMatrix * invParent;
+                        }
+
                         var gltfMatrix = ConvertSourceMatrixToGltf(sourceMatrix);
                         Matrix4x4.Decompose(gltfMatrix, out var gltfScale, out var gltfRotation, out var gltfTranslation);
                         gltfRotation = Quaternion.Normalize(gltfRotation);
@@ -386,7 +429,7 @@ namespace DSAnimStudio.Export
                     }
                     catch (Exception ex)
                     {
-                        throw new InvalidOperationException($"Failed to sample bone '{boneName}' at frame {frame} for animation '{animName}'.", ex);
+                        throw new InvalidOperationException($"Failed to sample bone '{channelName}' at frame {frame} for animation '{animName}'.", ex);
                     }
                 }
 

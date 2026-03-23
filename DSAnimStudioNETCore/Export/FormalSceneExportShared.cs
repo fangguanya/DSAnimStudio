@@ -251,31 +251,228 @@ namespace DSAnimStudio.Export
             return selected.Name;
         }
 
+        // ─── Bone reparent / rename configuration ───
+
+        private static readonly (string Bone, string NewParent)[] BoneReparentRules =
+        {
+            ("RootRotY", "Pelvis"),
+        };
+
+        internal static readonly Dictionary<string, string> BoneRenameRules = new(StringComparer.Ordinal)
+        {
+            ["RootRotY"]  = "spine_01",
+            ["RootRotXZ"] = "spine_02",
+            ["Spine"]     = "spine_03",
+            ["Spine1"]    = "spine_04",
+            ["Spine2"]    = "spine_05",
+        };
+
+        /// <summary>
+        /// Returns the renamed bone name if a rule exists, otherwise returns the original.
+        /// </summary>
+        internal static string GetRenamedBoneName(string originalName)
+        {
+            if (originalName != null && BoneRenameRules.TryGetValue(originalName, out string newName))
+                return newName;
+            return originalName;
+        }
+
+        /// <summary>
+        /// Deep-copies FLVER.Nodes and applies reparent + rename + local transform recalculation in source space.
+        /// The returned list can be used everywhere in place of the original flver.Nodes.
+        /// </summary>
+        public static List<FLVER.Node> BuildModifiedFlverNodes(IList<FLVER.Node> originalNodes, float scaleFactor)
+        {
+            var nodes = new List<FLVER.Node>(originalNodes.Count);
+            for (int i = 0; i < originalNodes.Count; i++)
+                nodes.Add(new FLVER.Node(originalNodes[i]));
+
+            foreach (var (boneName, newParentName) in BoneReparentRules)
+            {
+                int boneIdx = nodes.FindIndex(n => string.Equals(n.Name, boneName, StringComparison.Ordinal));
+                if (boneIdx < 0) { Console.WriteLine($"    [BoneTransform] reparent source '{boneName}' not found, skipping."); continue; }
+
+                int newParentIdx = nodes.FindIndex(n => string.Equals(n.Name, newParentName, StringComparison.Ordinal));
+                if (newParentIdx < 0) { Console.WriteLine($"    [BoneTransform] reparent target '{newParentName}' not found, skipping."); continue; }
+
+                Console.WriteLine($"    [BoneTransform] Reparent '{boneName}' from parent={nodes[boneIdx].ParentIndex} to '{newParentName}' (idx={newParentIdx})");
+
+                // Recalculate local transform: newLocal = oldLocal * inv(newParentLocal) [row-vector convention]
+                var oldLocal = nodes[boneIdx].ComputeLocalTransform()
+                    * Matrix4x4.CreateScale(1f / scaleFactor == 0 ? 1 : 1, 1, 1); // identity guard
+                // Recompute with scale factor applied to translations
+                oldLocal = ComputeSourceLocalMatrix(nodes[boneIdx], scaleFactor);
+                var parentLocal = ComputeSourceLocalMatrix(nodes[newParentIdx], scaleFactor);
+
+                if (Matrix4x4.Invert(parentLocal, out var invParentLocal))
+                {
+                    var newLocal = oldLocal * invParentLocal;
+                    DecomposeToFlverNode(newLocal, scaleFactor, nodes[boneIdx]);
+                }
+                else
+                {
+                    Console.WriteLine($"    [BoneTransform] WARNING: cannot invert parent local for '{boneName}', keeping original transform.");
+                }
+
+                nodes[boneIdx].ParentIndex = (short)newParentIdx;
+            }
+
+            // Apply rename
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                if (BoneRenameRules.TryGetValue(nodes[i].Name, out string newName))
+                {
+                    Console.WriteLine($"    [BoneTransform] Rename '{nodes[i].Name}' -> '{newName}'");
+                    nodes[i].Name = newName;
+                }
+            }
+
+            return nodes;
+        }
+
+        /// <summary>
+        /// Computes the source-space local matrix for a FLVER.Node with a scale factor applied to translation.
+        /// </summary>
+        private static Matrix4x4 ComputeSourceLocalMatrix(FLVER.Node bone, float scaleFactor)
+        {
+            var s = Matrix4x4.CreateScale(bone.Scale.X, bone.Scale.Y, bone.Scale.Z);
+            var rx = Matrix4x4.CreateRotationX(bone.Rotation.X);
+            var rz = Matrix4x4.CreateRotationZ(bone.Rotation.Z);
+            var ry = Matrix4x4.CreateRotationY(bone.Rotation.Y);
+            var t = Matrix4x4.CreateTranslation(
+                bone.Translation.X * scaleFactor,
+                bone.Translation.Y * scaleFactor,
+                bone.Translation.Z * scaleFactor);
+            return s * rx * rz * ry * t;
+        }
+
+        /// <summary>
+        /// Decomposes a source-space local matrix back into FLVER.Node Translation/Rotation/Scale fields.
+        /// Uses XZY Euler extraction matching the FLVER convention: localMatrix = S * Rx * Rz * Ry * T.
+        /// </summary>
+        private static void DecomposeToFlverNode(Matrix4x4 localMatrix, float scaleFactor, FLVER.Node target)
+        {
+            // Decompose using System.Numerics (gives quaternion)
+            if (!Matrix4x4.Decompose(localMatrix, out var scale, out var quat, out var translation))
+            {
+                Console.WriteLine($"    [BoneTransform] WARNING: matrix decomposition failed for '{target.Name}'.");
+                return;
+            }
+
+            // Convert quaternion to rotation matrix, then extract XZY Euler angles
+            var rotMatrix = Matrix4x4.CreateFromQuaternion(quat);
+
+            // From the derivation: R = Rx(a) * Rz(b) * Ry(c)
+            // R[0][1] = sin(b)  => b = asin(M12)
+            // R[1][1] = cos(a)*cos(b), R[2][1] = -sin(a)*cos(b) => a = atan2(-M32, M22)
+            // R[0][0] = cos(b)*cos(c), R[0][2] = -cos(b)*sin(c) => c = atan2(-M13, M11)
+            float sinB = Math.Clamp(rotMatrix.M12, -1f, 1f);
+            float b = MathF.Asin(sinB);
+            float cosB = MathF.Cos(b);
+
+            float a, c;
+            if (MathF.Abs(cosB) > 1e-6f)
+            {
+                a = MathF.Atan2(-rotMatrix.M32, rotMatrix.M22);
+                c = MathF.Atan2(-rotMatrix.M13, rotMatrix.M11);
+            }
+            else
+            {
+                // Gimbal lock fallback
+                a = MathF.Atan2(rotMatrix.M31, rotMatrix.M33);
+                c = 0;
+            }
+
+            target.Translation = scaleFactor != 0
+                ? new Vector3(translation.X / scaleFactor, translation.Y / scaleFactor, translation.Z / scaleFactor)
+                : new Vector3(translation.X, translation.Y, translation.Z);
+            target.Rotation = new Vector3(a, c, b); // X=a, Y=c, Z=b
+            target.Scale = scale;
+        }
+
         /// <summary>
         /// Builds skeleton nodes from FLVER bind-pose bones and converts them into the formal glTF basis.
+        /// Deep-copies and modifies FLVER.Nodes (reparent + rename) before building the hierarchy.
         /// </summary>
         public static List<Node> BuildSkeletonHierarchyFromFlver(FLVER2 flver, Node rootNode, float scaleFactor)
         {
+            return BuildSkeletonHierarchyFromFlver(flver, rootNode, scaleFactor, out _);
+        }
+
+        public static List<Node> BuildSkeletonHierarchyFromFlver(FLVER2 flver, Node rootNode, float scaleFactor, out List<FLVER.Node> modifiedNodes)
+        {
+            modifiedNodes = BuildModifiedFlverNodes(flver.Nodes, scaleFactor);
+            var nodes = modifiedNodes;
+
             return BuildSkeletonHierarchy(
-                flver.Nodes.Count,
-                i => !string.IsNullOrEmpty(flver.Nodes[i].Name) ? flver.Nodes[i].Name : $"Bone_{i}",
-                i => (short)flver.Nodes[i].ParentIndex,
+                nodes.Count,
+                i => !string.IsNullOrEmpty(nodes[i].Name) ? nodes[i].Name : $"Bone_{i}",
+                i => nodes[i].ParentIndex,
                 i =>
                 {
-                    var flverBone = flver.Nodes[i];
-                    var s = Matrix4x4.CreateScale(flverBone.Scale.X, flverBone.Scale.Y, flverBone.Scale.Z);
-                    var rx = Matrix4x4.CreateRotationX(flverBone.Rotation.X);
-                    var rz = Matrix4x4.CreateRotationZ(flverBone.Rotation.Z);
-                    var ry = Matrix4x4.CreateRotationY(flverBone.Rotation.Y);
-                    var t = Matrix4x4.CreateTranslation(
-                        flverBone.Translation.X * scaleFactor,
-                        flverBone.Translation.Y * scaleFactor,
-                        flverBone.Translation.Z * scaleFactor);
-
-                    var localMatrix = s * rx * rz * ry * t;
+                    var localMatrix = ComputeSourceLocalMatrix(nodes[i], scaleFactor);
                     return ConvertSourceMatrixToGltf(localMatrix);
                 },
                 rootNode);
+        }
+
+        /// <summary>
+        /// Builds modified parallel arrays from HKX skeleton data (reparent + rename + transform recalc).
+        /// Returns (names[], parentIndices[], sourceLocalMatrices[]).
+        /// </summary>
+        public static (string[] Names, short[] ParentIndices, Matrix4x4[] SourceLocals) BuildModifiedHkxBoneArrays(
+            HKX.HKASkeleton skeleton, float scaleFactor)
+        {
+            int boneCount = (int)skeleton.Bones.Size;
+            var names = new string[boneCount];
+            var parentIndices = new short[boneCount];
+            var sourceLocals = new Matrix4x4[boneCount];
+
+            for (int i = 0; i < boneCount; i++)
+            {
+                names[i] = skeleton.Bones[i].Name.GetString() ?? $"Bone_{i}";
+                parentIndices[i] = skeleton.ParentIndices[i].data;
+
+                var transform = skeleton.Transforms[i];
+                var pos = transform.Position.Vector;
+                var rot = transform.Rotation.Vector;
+                var scl = transform.Scale.Vector;
+                sourceLocals[i] = CreateLocalMatrix(
+                    new Vector3(pos.X * scaleFactor, pos.Y * scaleFactor, pos.Z * scaleFactor),
+                    new Quaternion(rot.X, rot.Y, rot.Z, rot.W),
+                    new Vector3(scl.X, scl.Y, scl.Z));
+            }
+
+            // Apply reparent
+            foreach (var (boneName, newParentName) in BoneReparentRules)
+            {
+                int boneIdx = Array.FindIndex(names, n => string.Equals(n, boneName, StringComparison.Ordinal));
+                if (boneIdx < 0) { Console.WriteLine($"    [BoneTransform/HKX] reparent source '{boneName}' not found, skipping."); continue; }
+
+                int newParentIdx = Array.FindIndex(names, n => string.Equals(n, newParentName, StringComparison.Ordinal));
+                if (newParentIdx < 0) { Console.WriteLine($"    [BoneTransform/HKX] reparent target '{newParentName}' not found, skipping."); continue; }
+
+                Console.WriteLine($"    [BoneTransform/HKX] Reparent '{boneName}' from parent={parentIndices[boneIdx]} to '{newParentName}' (idx={newParentIdx})");
+
+                if (Matrix4x4.Invert(sourceLocals[newParentIdx], out var invParentLocal))
+                    sourceLocals[boneIdx] = sourceLocals[boneIdx] * invParentLocal;
+                else
+                    Console.WriteLine($"    [BoneTransform/HKX] WARNING: cannot invert parent local for '{boneName}', keeping original.");
+
+                parentIndices[boneIdx] = (short)newParentIdx;
+            }
+
+            // Apply rename
+            for (int i = 0; i < boneCount; i++)
+            {
+                if (BoneRenameRules.TryGetValue(names[i], out string newName))
+                {
+                    Console.WriteLine($"    [BoneTransform/HKX] Rename '{names[i]}' -> '{newName}'");
+                    names[i] = newName;
+                }
+            }
+
+            return (names, parentIndices, sourceLocals);
         }
 
         /// <summary>
@@ -283,24 +480,23 @@ namespace DSAnimStudio.Export
         /// </summary>
         public static List<Node> BuildSkeletonHierarchyFromHkx(HKX.HKASkeleton skeleton, Node rootNode, float scaleFactor)
         {
+            return BuildSkeletonHierarchyFromHkx(skeleton, rootNode, scaleFactor,
+                out _, out _, out _);
+        }
+
+        public static List<Node> BuildSkeletonHierarchyFromHkx(HKX.HKASkeleton skeleton, Node rootNode, float scaleFactor,
+            out string[] modifiedNames, out short[] modifiedParentIndices, out Matrix4x4[] modifiedSourceLocals)
+        {
+            var (names, parentIndices, sourceLocals) = BuildModifiedHkxBoneArrays(skeleton, scaleFactor);
+            modifiedNames = names;
+            modifiedParentIndices = parentIndices;
+            modifiedSourceLocals = sourceLocals;
+
             return BuildSkeletonHierarchy(
-                (int)skeleton.Bones.Size,
-                i => skeleton.Bones[i].Name.GetString() ?? $"Bone_{i}",
-                i => skeleton.ParentIndices[i].data,
-                i =>
-                {
-                    var transform = skeleton.Transforms[i];
-                    var pos = transform.Position.Vector;
-                    var rot = transform.Rotation.Vector;
-                    var scl = transform.Scale.Vector;
-
-                    var translation = new Vector3(pos.X * scaleFactor, pos.Y * scaleFactor, pos.Z * scaleFactor);
-                    var rotation = new Quaternion(rot.X, rot.Y, rot.Z, rot.W);
-                    var boneScale = new Vector3(scl.X, scl.Y, scl.Z);
-
-                    var localMatrix = CreateLocalMatrix(translation, rotation, boneScale);
-                    return ConvertSourceMatrixToGltf(localMatrix);
-                },
+                names.Length,
+                i => names[i],
+                i => parentIndices[i],
+                i => ConvertSourceMatrixToGltf(sourceLocals[i]),
                 rootNode);
         }
 
@@ -531,7 +727,7 @@ namespace DSAnimStudio.Export
                 if (globalBoneIdx < 0 || globalBoneIdx >= flver.Nodes.Count)
                     continue;
 
-                string boneName = flver.Nodes[globalBoneIdx].Name;
+                string boneName = GetRenamedBoneName(flver.Nodes[globalBoneIdx].Name);
                 if (string.IsNullOrWhiteSpace(boneName))
                     boneName = $"Bone_{globalBoneIdx}";
 
