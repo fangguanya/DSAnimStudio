@@ -191,10 +191,132 @@ namespace SekiroMaterialSetupInternal
 		return Add;
 	}
 
+	static bool ValidateRequiredTextureParameters(UMaterial* Material, const FString& MaterialObjectPath, TArray<FString>& OutErrors)
+	{
+		static const TCHAR* RequiredTextureParameters[] = {
+			TEXT("BaseColor"),
+			TEXT("BaseColor2"),
+			TEXT("Normal"),
+			TEXT("Normal2"),
+			TEXT("Specular"),
+			TEXT("Specular2"),
+			TEXT("Roughness"),
+			TEXT("Roughness2"),
+			TEXT("Emissive"),
+			TEXT("Emissive2"),
+			TEXT("BlendMask"),
+			TEXT("BlendMask3")
+		};
+
+		TArray<FMaterialParameterInfo> TextureParameters;
+		TArray<FGuid> TextureParameterIds;
+		Material->GetAllTextureParameterInfo(TextureParameters, TextureParameterIds);
+
+		TSet<FName> PresentParameters;
+		for (const FMaterialParameterInfo& ParameterInfo : TextureParameters)
+		{
+			PresentParameters.Add(ParameterInfo.Name);
+		}
+
+		bool bValid = true;
+		for (const TCHAR* RequiredParameter : RequiredTextureParameters)
+		{
+			if (!PresentParameters.Contains(FName(RequiredParameter)))
+			{
+				OutErrors.Add(FString::Printf(TEXT("Formal master material '%s' is missing required texture parameter '%s'."), *MaterialObjectPath, RequiredParameter));
+				bValid = false;
+			}
+		}
+
+		return bValid;
+	}
+
+	static bool ValidateRequiredScalarParameters(UMaterial* Material, const FString& MaterialObjectPath, TArray<FString>& OutErrors)
+	{
+		static const TCHAR* RequiredScalarParameters[] = {
+			TEXT("BaseColor_UScale"), TEXT("BaseColor_VScale"),
+			TEXT("BaseColor2_UScale"), TEXT("BaseColor2_VScale"),
+			TEXT("Normal_UScale"), TEXT("Normal_VScale"),
+			TEXT("Normal2_UScale"), TEXT("Normal2_VScale"),
+			TEXT("Specular_UScale"), TEXT("Specular_VScale"),
+			TEXT("Specular2_UScale"), TEXT("Specular2_VScale"),
+			TEXT("Roughness_UScale"), TEXT("Roughness_VScale"),
+			TEXT("Roughness2_UScale"), TEXT("Roughness2_VScale"),
+			TEXT("Emissive_UScale"), TEXT("Emissive_VScale"),
+			TEXT("Emissive2_UScale"), TEXT("Emissive2_VScale"),
+			TEXT("BlendMask_UScale"), TEXT("BlendMask_VScale"),
+			TEXT("BlendMask3_UScale"), TEXT("BlendMask3_VScale")
+		};
+
+		TArray<FMaterialParameterInfo> ScalarParameters;
+		TArray<FGuid> ScalarParameterIds;
+		Material->GetAllScalarParameterInfo(ScalarParameters, ScalarParameterIds);
+
+		TSet<FName> PresentParameters;
+		for (const FMaterialParameterInfo& ParameterInfo : ScalarParameters)
+		{
+			PresentParameters.Add(ParameterInfo.Name);
+		}
+
+		bool bValid = true;
+		for (const TCHAR* RequiredParameter : RequiredScalarParameters)
+		{
+			if (!PresentParameters.Contains(FName(RequiredParameter)))
+			{
+				OutErrors.Add(FString::Printf(TEXT("Formal master material '%s' is missing required scalar parameter '%s'."), *MaterialObjectPath, RequiredParameter));
+				bValid = false;
+			}
+		}
+
+		return bValid;
+	}
+
+	static bool ValidateFormalMasterMaterial(UMaterial* Material, const FString& MaterialObjectPath, TArray<FString>& OutErrors)
+	{
+		if (!Material)
+		{
+			OutErrors.Add(FString::Printf(TEXT("Formal master material failed to load: %s"), *MaterialObjectPath));
+			return false;
+		}
+
+		bool bValid = true;
+		if (Material->MaterialDomain != MD_Surface)
+		{
+			OutErrors.Add(FString::Printf(TEXT("Formal master material '%s' must use surface domain."), *MaterialObjectPath));
+			bValid = false;
+		}
+
+		if (Material->BlendMode != BLEND_Opaque)
+		{
+			OutErrors.Add(FString::Printf(TEXT("Formal master material '%s' must use opaque blend mode."), *MaterialObjectPath));
+			bValid = false;
+		}
+
+		if (!Material->IsShadingModelFromMaterialExpression() && !Material->GetShadingModels().HasShadingModel(MSM_DefaultLit))
+		{
+			OutErrors.Add(FString::Printf(TEXT("Formal master material '%s' must use DefaultLit shading."), *MaterialObjectPath));
+			bValid = false;
+		}
+
+		if (!Material->bUsedWithSkeletalMesh)
+		{
+			OutErrors.Add(FString::Printf(TEXT("Formal master material '%s' must be enabled for skeletal meshes."), *MaterialObjectPath));
+			bValid = false;
+		}
+
+		return ValidateRequiredTextureParameters(Material, MaterialObjectPath, OutErrors)
+			&& ValidateRequiredScalarParameters(Material, MaterialObjectPath, OutErrors)
+			&& bValid;
+	}
+
 	static UMaterial* EnsureFormalMasterMaterial(const FString& MaterialObjectPath, TArray<FString>& OutErrors)
 	{
 		UMaterial* Material = Cast<UMaterial>(StaticLoadObject(UMaterial::StaticClass(), nullptr, *MaterialObjectPath));
 		const bool bCreatedNewMaterial = (Material == nullptr);
+		if (Material)
+		{
+			return ValidateFormalMasterMaterial(Material, MaterialObjectPath, OutErrors) ? Material : nullptr;
+		}
 
 		const FString PackagePath = GetPackagePathFromObjectPath(MaterialObjectPath);
 		const FString AssetName = FPackageName::GetLongPackageAssetName(PackagePath);

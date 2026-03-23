@@ -45,6 +45,21 @@ namespace
 			const TCHAR* EndBone;
 		};
 
+		struct FWorldPositionMetricSpec
+		{
+			const TCHAR* MetricName;
+			const TCHAR* BoneName;
+			const TCHAR* AlternateBoneName;
+			bool bRequired;
+		};
+
+		struct FRotationMetricSpec
+		{
+			const TCHAR* MetricName;
+			const TCHAR* BoneName;
+			bool bRequired;
+		};
+
 		struct FHandBasisMetricSpec
 		{
 			const TCHAR* Prefix;
@@ -68,7 +83,39 @@ namespace
 			bool bSuccess = false;
 			TMap<FString, double> MinimumDirectionDots;
 			TMap<FString, double> MinimumHandBasisDots;
+			TMap<FString, double> MaximumWorldPositionErrors;
+			TMap<FString, double> MaximumRootMotionDeltaErrors;
+			TMap<FString, double> MinimumRotationForwardDots;
+			int32 ExpectedPayloadBoneCount = 0;
+			int32 PayloadBoneCount = 0;
+			int32 SynthesizedPayloadBoneCount = 0;
+			TArray<FString> MissingPayloadBones;
+			TArray<FString> SynthesizedPayloadBones;
 			TArray<FString> Issues;
+		};
+
+		struct FImportedAnimationValidationAggregate
+		{
+			int32 ClipCount = 0;
+			int32 PassedClipCount = 0;
+			int32 FailedClipCount = 0;
+			int32 ExpectedPayloadBoneCount = 0;
+			int32 PayloadBoneCount = 0;
+			int32 SynthesizedPayloadBoneCount = 0;
+			TArray<FString> FailedClips;
+			TArray<FString> ClipsWithMissingPayload;
+			TArray<FString> ClipsWithSynthesizedFallback;
+			TMap<FString, double> MinimumDirectionDots;
+			TMap<FString, double> MinimumHandBasisDots;
+			TMap<FString, double> MaximumWorldPositionErrors;
+			TMap<FString, double> MaximumRootMotionDeltaErrors;
+			TMap<FString, double> MinimumRotationForwardDots;
+		};
+
+		struct FSkeletalMeshValidationSummary
+		{
+			bool bSkinBindingValidated = false;
+			TMap<FString, double> MaximumInverseBindMatrixErrors;
 		};
 
 	struct FGltfPayload
@@ -82,12 +129,47 @@ namespace
 		static const TArray<FDirectionMetricSpec>& GetImportAnimationDirectionMetrics()
 		{
 			static const TArray<FDirectionMetricSpec> Metrics = {
-				{ TEXT("left_shoulder_hand"), TEXT("L_Shoulder"), TEXT("L_Hand") },
+				{ TEXT("pelvis_spine"), TEXT("Pelvis"), TEXT("Spine") },
+				{ TEXT("spine_head"), TEXT("Spine"), TEXT("Head") },
+				{ TEXT("left_clavicle_hand"), TEXT("L_Clavicle"), TEXT("L_Hand") },
 				{ TEXT("left_upper_lower"), TEXT("L_UpperArm"), TEXT("L_Forearm") },
 				{ TEXT("left_lower_hand"), TEXT("L_Forearm"), TEXT("L_Hand") },
-				{ TEXT("right_shoulder_hand"), TEXT("R_Shoulder"), TEXT("R_Hand") },
+				{ TEXT("right_clavicle_hand"), TEXT("R_Clavicle"), TEXT("R_Hand") },
 				{ TEXT("right_upper_lower"), TEXT("R_UpperArm"), TEXT("R_Forearm") },
 				{ TEXT("right_lower_hand"), TEXT("R_Forearm"), TEXT("R_Hand") },
+				{ TEXT("left_thigh_foot"), TEXT("L_Thigh"), TEXT("L_Foot") },
+				{ TEXT("right_thigh_foot"), TEXT("R_Thigh"), TEXT("R_Foot") },
+			};
+			return Metrics;
+		}
+
+		static const TArray<FWorldPositionMetricSpec>& GetImportAnimationWorldPositionMetrics()
+		{
+			static const TArray<FWorldPositionMetricSpec> Metrics = {
+				{ TEXT("master"), TEXT("Master"), nullptr, true },
+				{ TEXT("pelvis"), TEXT("Pelvis"), nullptr, true },
+				{ TEXT("head"), TEXT("Head"), nullptr, true },
+				{ TEXT("left_hand"), TEXT("L_Hand"), nullptr, true },
+				{ TEXT("right_hand"), TEXT("R_Hand"), nullptr, true },
+				{ TEXT("left_foot"), TEXT("L_Foot"), nullptr, true },
+				{ TEXT("right_foot"), TEXT("R_Foot"), nullptr, true },
+				{ TEXT("left_clavicle"), TEXT("L_Clavicle"), nullptr, true },
+				{ TEXT("right_clavicle"), TEXT("R_Clavicle"), nullptr, true },
+				{ TEXT("weapon_sheath"), TEXT("W_Sheath"), TEXT("weapon_sheath"), false },
+				{ TEXT("face_root"), TEXT("face_root"), TEXT("FaceRoot"), false },
+			};
+			return Metrics;
+		}
+
+		static const TArray<FRotationMetricSpec>& GetImportAnimationRotationMetrics()
+		{
+			static const TArray<FRotationMetricSpec> Metrics = {
+				{ TEXT("pelvis_forward"), TEXT("Pelvis"), true },
+				{ TEXT("head_forward"), TEXT("Head"), true },
+				{ TEXT("left_hand_forward"), TEXT("L_Hand"), true },
+				{ TEXT("right_hand_forward"), TEXT("R_Hand"), true },
+				{ TEXT("left_foot_forward"), TEXT("L_Foot"), true },
+				{ TEXT("right_foot_forward"), TEXT("R_Foot"), true },
 			};
 			return Metrics;
 		}
@@ -104,12 +186,56 @@ namespace
 		static const TMap<FString, double>& GetImportAnimationDirectionThresholds()
 		{
 			static const TMap<FString, double> Thresholds = {
-				{ TEXT("left_shoulder_hand"), 0.99 },
+				{ TEXT("pelvis_spine"), 0.99 },
+				{ TEXT("spine_head"), 0.99 },
+				{ TEXT("left_clavicle_hand"), 0.99 },
 				{ TEXT("left_upper_lower"), 0.99 },
 				{ TEXT("left_lower_hand"), 0.99 },
-				{ TEXT("right_shoulder_hand"), 0.99 },
+				{ TEXT("right_clavicle_hand"), 0.99 },
 				{ TEXT("right_upper_lower"), 0.99 },
 				{ TEXT("right_lower_hand"), 0.99 },
+				{ TEXT("left_thigh_foot"), 0.99 },
+				{ TEXT("right_thigh_foot"), 0.99 },
+			};
+			return Thresholds;
+		}
+
+		static const TMap<FString, double>& GetImportAnimationWorldPositionErrorThresholds()
+		{
+			static const TMap<FString, double> Thresholds = {
+				{ TEXT("master"), 0.25 },
+				{ TEXT("pelvis"), 0.25 },
+				{ TEXT("head"), 0.25 },
+				{ TEXT("left_hand"), 0.25 },
+				{ TEXT("right_hand"), 0.25 },
+				{ TEXT("left_foot"), 0.25 },
+				{ TEXT("right_foot"), 0.25 },
+				{ TEXT("left_clavicle"), 0.25 },
+				{ TEXT("right_clavicle"), 0.25 },
+				{ TEXT("weapon_sheath"), 0.25 },
+				{ TEXT("face_root"), 0.25 },
+			};
+			return Thresholds;
+		}
+
+		static const TMap<FString, double>& GetImportAnimationRootMotionDeltaErrorThresholds()
+		{
+			static const TMap<FString, double> Thresholds = {
+				{ TEXT("master_delta"), 0.25 },
+				{ TEXT("pelvis_delta"), 0.25 },
+			};
+			return Thresholds;
+		}
+
+		static const TMap<FString, double>& GetImportAnimationRotationForwardThresholds()
+		{
+			static const TMap<FString, double> Thresholds = {
+				{ TEXT("pelvis_forward"), 0.999 },
+				{ TEXT("head_forward"), 0.999 },
+				{ TEXT("left_hand_forward"), 0.995 },
+				{ TEXT("right_hand_forward"), 0.995 },
+				{ TEXT("left_foot_forward"), 0.995 },
+				{ TEXT("right_foot_forward"), 0.995 },
 			};
 			return Thresholds;
 		}
@@ -132,6 +258,23 @@ namespace
 			if (const FTransform* BoneTransform = BoneWorldByName.Find(BoneName))
 			{
 				OutTranslation = BoneTransform->GetLocation();
+				return true;
+			}
+			return false;
+		}
+
+		static bool TryGetBoneTranslationByAliases(
+			const TMap<FString, FTransform>& BoneWorldByName,
+			const TCHAR* PrimaryBoneName,
+			const TCHAR* AlternateBoneName,
+			FVector& OutTranslation)
+		{
+			if (PrimaryBoneName && TryGetBoneTranslation(BoneWorldByName, PrimaryBoneName, OutTranslation))
+			{
+				return true;
+			}
+			if (AlternateBoneName && TryGetBoneTranslation(BoneWorldByName, AlternateBoneName, OutTranslation))
+			{
 				return true;
 			}
 			return false;
@@ -197,20 +340,45 @@ namespace
 			}
 		}
 
+		static void AccumulateMaximumMetric(TMap<FString, double>& InOutMetrics, const FString& MetricName, const double Value)
+		{
+			const double* ExistingValue = InOutMetrics.Find(MetricName);
+			if (!ExistingValue || Value > *ExistingValue)
+			{
+				InOutMetrics.Add(MetricName, Value);
+			}
+		}
+
 		static void AccumulateImportedAnimationValidationFrame(
 			const TMap<FString, FTransform>& SourceNormalizedWorldByBone,
 			const TMap<FString, FTransform>& TargetWorldByBone,
 			TMap<FString, double>& InOutMinimumDirectionDots,
+			TSet<FString>& InOutSourceDirectionMetrics,
 			TSet<FString>& InOutSeenDirectionMetrics,
 			TMap<FString, double>& InOutMinimumHandBasisDots,
-			TSet<FString>& InOutSeenHandBasisMetrics)
+			TSet<FString>& InOutSourceHandBasisMetrics,
+			TSet<FString>& InOutSeenHandBasisMetrics,
+			TMap<FString, double>& InOutMaximumWorldPositionErrors,
+			TSet<FString>& InOutSeenWorldPositionMetrics,
+			TMap<FString, double>& InOutMaximumRootMotionDeltaErrors,
+			TSet<FString>& InOutSeenRootMotionMetrics,
+			TMap<FString, double>& InOutMinimumRotationForwardDots,
+			TSet<FString>& InOutSeenRotationMetrics,
+			const TMap<FString, FVector>& PreviousSourceLocations,
+			const TMap<FString, FVector>& PreviousTargetLocations)
 		{
 			for (const FDirectionMetricSpec& Metric : GetImportAnimationDirectionMetrics())
 			{
 				FVector SourceDirection = FVector::ZeroVector;
 				FVector TargetDirection = FVector::ZeroVector;
-				if (!TryGetNormalizedDirection(SourceNormalizedWorldByBone, Metric.StartBone, Metric.EndBone, SourceDirection)
-					|| !TryGetNormalizedDirection(TargetWorldByBone, Metric.StartBone, Metric.EndBone, TargetDirection))
+				const bool bSourceDirectionValid = TryGetNormalizedDirection(SourceNormalizedWorldByBone, Metric.StartBone, Metric.EndBone, SourceDirection);
+				const bool bTargetDirectionValid = TryGetNormalizedDirection(TargetWorldByBone, Metric.StartBone, Metric.EndBone, TargetDirection);
+				if (bSourceDirectionValid)
+				{
+					InOutSourceDirectionMetrics.Add(Metric.MetricName);
+				}
+
+				if (!bSourceDirectionValid || !bTargetDirectionValid)
 				{
 					continue;
 				}
@@ -223,15 +391,24 @@ namespace
 			{
 				FHandBranchBasis SourceBasis;
 				FHandBranchBasis TargetBasis;
-				if (!TryComputeHandBranchBasis(SourceNormalizedWorldByBone, Metric.HandBone, Metric.IndexBone, Metric.MiddleBone, Metric.PinkyBone, SourceBasis)
-					|| !TryComputeHandBranchBasis(TargetWorldByBone, Metric.HandBone, Metric.IndexBone, Metric.MiddleBone, Metric.PinkyBone, TargetBasis))
-				{
-					continue;
-				}
+				const bool bSourceBasisValid = TryComputeHandBranchBasis(SourceNormalizedWorldByBone, Metric.HandBone, Metric.IndexBone, Metric.MiddleBone, Metric.PinkyBone, SourceBasis);
+				const bool bTargetBasisValid = TryComputeHandBranchBasis(TargetWorldByBone, Metric.HandBone, Metric.IndexBone, Metric.MiddleBone, Metric.PinkyBone, TargetBasis);
 
 				const FString ForwardMetric = FString::Printf(TEXT("%s_palm_forward"), Metric.Prefix);
 				const FString LateralMetric = FString::Printf(TEXT("%s_palm_lateral"), Metric.Prefix);
 				const FString NormalMetric = FString::Printf(TEXT("%s_palm_normal"), Metric.Prefix);
+
+				if (bSourceBasisValid)
+				{
+					InOutSourceHandBasisMetrics.Add(ForwardMetric);
+					InOutSourceHandBasisMetrics.Add(LateralMetric);
+					InOutSourceHandBasisMetrics.Add(NormalMetric);
+				}
+
+				if (!bSourceBasisValid || !bTargetBasisValid)
+				{
+					continue;
+				}
 
 				AccumulateMinimumMetric(InOutMinimumHandBasisDots, ForwardMetric, FVector::DotProduct(SourceBasis.PalmForward, TargetBasis.PalmForward));
 				AccumulateMinimumMetric(InOutMinimumHandBasisDots, LateralMetric, FVector::DotProduct(SourceBasis.PalmLateral, TargetBasis.PalmLateral));
@@ -241,20 +418,94 @@ namespace
 				InOutSeenHandBasisMetrics.Add(LateralMetric);
 				InOutSeenHandBasisMetrics.Add(NormalMetric);
 			}
+
+			for (const FWorldPositionMetricSpec& Metric : GetImportAnimationWorldPositionMetrics())
+			{
+				FVector SourceTranslation = FVector::ZeroVector;
+				FVector TargetTranslation = FVector::ZeroVector;
+				if (!TryGetBoneTranslationByAliases(SourceNormalizedWorldByBone, Metric.BoneName, Metric.AlternateBoneName, SourceTranslation)
+					|| !TryGetBoneTranslationByAliases(TargetWorldByBone, Metric.BoneName, Metric.AlternateBoneName, TargetTranslation))
+				{
+					continue;
+				}
+
+				AccumulateMaximumMetric(InOutMaximumWorldPositionErrors, Metric.MetricName, FVector::Distance(SourceTranslation, TargetTranslation));
+				InOutSeenWorldPositionMetrics.Add(Metric.MetricName);
+			}
+
+			for (const FRotationMetricSpec& Metric : GetImportAnimationRotationMetrics())
+			{
+				const FTransform* SourceTransform = SourceNormalizedWorldByBone.Find(Metric.BoneName);
+				const FTransform* TargetTransform = TargetWorldByBone.Find(Metric.BoneName);
+				if (!SourceTransform || !TargetTransform)
+				{
+					continue;
+				}
+
+				const FVector SourceForward = SourceTransform->ToMatrixWithScale().TransformVector(FVector::ForwardVector).GetSafeNormal();
+				const FVector TargetForward = TargetTransform->ToMatrixWithScale().TransformVector(FVector::ForwardVector).GetSafeNormal();
+				if (SourceForward.IsNearlyZero() || TargetForward.IsNearlyZero())
+				{
+					continue;
+				}
+
+				AccumulateMinimumMetric(InOutMinimumRotationForwardDots, Metric.MetricName, FVector::DotProduct(SourceForward, TargetForward));
+				InOutSeenRotationMetrics.Add(Metric.MetricName);
+			}
+
+			for (const TCHAR* BoneName : { TEXT("Master"), TEXT("Pelvis") })
+			{
+				FVector SourceTranslation = FVector::ZeroVector;
+				FVector TargetTranslation = FVector::ZeroVector;
+				if (!TryGetBoneTranslation(SourceNormalizedWorldByBone, BoneName, SourceTranslation)
+					|| !TryGetBoneTranslation(TargetWorldByBone, BoneName, TargetTranslation))
+				{
+					continue;
+				}
+
+				const FVector* PreviousSourceTranslation = PreviousSourceLocations.Find(BoneName);
+				const FVector* PreviousTargetTranslation = PreviousTargetLocations.Find(BoneName);
+				if (!PreviousSourceTranslation || !PreviousTargetTranslation)
+				{
+					continue;
+				}
+
+				const FString MetricName = FCString::Strcmp(BoneName, TEXT("Master")) == 0 ? TEXT("master_delta") : TEXT("pelvis_delta");
+				const FVector SourceDelta = SourceTranslation - *PreviousSourceTranslation;
+				const FVector TargetDelta = TargetTranslation - *PreviousTargetTranslation;
+				AccumulateMaximumMetric(InOutMaximumRootMotionDeltaErrors, MetricName, FVector::Distance(SourceDelta, TargetDelta));
+				InOutSeenRootMotionMetrics.Add(MetricName);
+			}
 		}
 
 		static void FinalizeImportedAnimationValidation(
 			FImportedAnimationValidationSummary& OutSummary,
 			const TMap<FString, double>& MinimumDirectionDots,
+			const TSet<FString>& SourceDirectionMetrics,
 			const TSet<FString>& SeenDirectionMetrics,
 			const TMap<FString, double>& MinimumHandBasisDots,
-			const TSet<FString>& SeenHandBasisMetrics)
+			const TSet<FString>& SourceHandBasisMetrics,
+			const TSet<FString>& SeenHandBasisMetrics,
+			const TMap<FString, double>& MaximumWorldPositionErrors,
+			const TSet<FString>& SeenWorldPositionMetrics,
+			const TMap<FString, double>& MaximumRootMotionDeltaErrors,
+			const TSet<FString>& SeenRootMotionMetrics,
+			const TMap<FString, double>& MinimumRotationForwardDots,
+			const TSet<FString>& SeenRotationMetrics)
 		{
 			OutSummary.MinimumDirectionDots = MinimumDirectionDots;
 			OutSummary.MinimumHandBasisDots = MinimumHandBasisDots;
+			OutSummary.MaximumWorldPositionErrors = MaximumWorldPositionErrors;
+			OutSummary.MaximumRootMotionDeltaErrors = MaximumRootMotionDeltaErrors;
+			OutSummary.MinimumRotationForwardDots = MinimumRotationForwardDots;
 
 			for (const TPair<FString, double>& Threshold : GetImportAnimationDirectionThresholds())
 			{
+				if (!SourceDirectionMetrics.Contains(Threshold.Key))
+				{
+					continue;
+				}
+
 				if (!SeenDirectionMetrics.Contains(Threshold.Key))
 				{
 					OutSummary.Issues.Add(FString::Printf(TEXT("missing imported animation direction metric '%s'"), *Threshold.Key));
@@ -270,6 +521,11 @@ namespace
 
 			for (const TPair<FString, double>& Threshold : GetImportAnimationHandBasisThresholds())
 			{
+				if (!SourceHandBasisMetrics.Contains(Threshold.Key))
+				{
+					continue;
+				}
+
 				if (!SeenHandBasisMetrics.Contains(Threshold.Key))
 				{
 					OutSummary.Issues.Add(FString::Printf(TEXT("missing imported animation hand basis metric '%s'"), *Threshold.Key));
@@ -283,7 +539,130 @@ namespace
 				}
 			}
 
+			for (const FWorldPositionMetricSpec& Metric : GetImportAnimationWorldPositionMetrics())
+			{
+				if (!SeenWorldPositionMetrics.Contains(Metric.MetricName))
+				{
+					if (Metric.bRequired)
+					{
+						OutSummary.Issues.Add(FString::Printf(TEXT("missing imported animation world position metric '%s'"), Metric.MetricName));
+					}
+					continue;
+				}
+
+				const double* Threshold = GetImportAnimationWorldPositionErrorThresholds().Find(Metric.MetricName);
+				const double* Value = MaximumWorldPositionErrors.Find(Metric.MetricName);
+				if (Threshold && (!Value || *Value > *Threshold))
+				{
+					OutSummary.Issues.Add(FString::Printf(TEXT("imported animation world position metric '%s' exceeded %.3f: %.6f"), Metric.MetricName, *Threshold, Value ? *Value : -1.0));
+				}
+			}
+
+			for (const TPair<FString, double>& Threshold : GetImportAnimationRootMotionDeltaErrorThresholds())
+			{
+				if (!SeenRootMotionMetrics.Contains(Threshold.Key))
+				{
+					OutSummary.Issues.Add(FString::Printf(TEXT("missing imported animation root-motion metric '%s'"), *Threshold.Key));
+					continue;
+				}
+
+				const double* Value = MaximumRootMotionDeltaErrors.Find(Threshold.Key);
+				if (!Value || *Value > Threshold.Value)
+				{
+					OutSummary.Issues.Add(FString::Printf(TEXT("imported animation root-motion metric '%s' exceeded %.3f: %.6f"), *Threshold.Key, Threshold.Value, Value ? *Value : -1.0));
+				}
+			}
+
+			for (const FRotationMetricSpec& Metric : GetImportAnimationRotationMetrics())
+			{
+				if (!SeenRotationMetrics.Contains(Metric.MetricName))
+				{
+					if (Metric.bRequired)
+					{
+						OutSummary.Issues.Add(FString::Printf(TEXT("missing imported animation rotation metric '%s'"), Metric.MetricName));
+					}
+					continue;
+				}
+
+				const double* Threshold = GetImportAnimationRotationForwardThresholds().Find(Metric.MetricName);
+				const double* Value = MinimumRotationForwardDots.Find(Metric.MetricName);
+				if (Threshold && (!Value || *Value < *Threshold))
+				{
+					OutSummary.Issues.Add(FString::Printf(TEXT("imported animation rotation metric '%s' fell below %.3f: %.6f"), Metric.MetricName, *Threshold, Value ? *Value : -1.0));
+				}
+			}
+
+			if (OutSummary.PayloadBoneCount < OutSummary.ExpectedPayloadBoneCount)
+			{
+				OutSummary.Issues.Add(FString::Printf(TEXT("imported animation payload coverage incomplete: expected %d, got %d"), OutSummary.ExpectedPayloadBoneCount, OutSummary.PayloadBoneCount));
+			}
+
+			if (OutSummary.MissingPayloadBones.Num() > 0)
+			{
+				OutSummary.Issues.Add(FString::Printf(TEXT("imported animation missing payload bones: %s"), *FString::Join(OutSummary.MissingPayloadBones, TEXT(", "))));
+			}
+
+			if (OutSummary.SynthesizedPayloadBones.Num() > 0)
+			{
+				OutSummary.Issues.Add(FString::Printf(TEXT("imported animation synthesized fallback payload bones: %s"), *FString::Join(OutSummary.SynthesizedPayloadBones, TEXT(", "))));
+			}
+
 			OutSummary.bSuccess = OutSummary.Issues.Num() == 0;
+		}
+
+		static FImportedAnimationValidationAggregate AggregateImportedAnimationValidationSummaries(const TArray<FImportedAnimationValidationSummary>& Summaries)
+		{
+			FImportedAnimationValidationAggregate Aggregate;
+			Aggregate.ClipCount = Summaries.Num();
+
+			for (const FImportedAnimationValidationSummary& Summary : Summaries)
+			{
+				Aggregate.ExpectedPayloadBoneCount += Summary.ExpectedPayloadBoneCount;
+				Aggregate.PayloadBoneCount += Summary.PayloadBoneCount;
+				Aggregate.SynthesizedPayloadBoneCount += Summary.SynthesizedPayloadBoneCount;
+				if (Summary.bSuccess)
+				{
+					++Aggregate.PassedClipCount;
+				}
+				else
+				{
+					++Aggregate.FailedClipCount;
+					Aggregate.FailedClips.Add(Summary.ClipName);
+				}
+
+				if (Summary.MissingPayloadBones.Num() > 0)
+				{
+					Aggregate.ClipsWithMissingPayload.Add(Summary.ClipName);
+				}
+
+				if (Summary.SynthesizedPayloadBones.Num() > 0)
+				{
+					Aggregate.ClipsWithSynthesizedFallback.Add(Summary.ClipName);
+				}
+
+				for (const TPair<FString, double>& Metric : Summary.MinimumDirectionDots)
+				{
+					AccumulateMinimumMetric(Aggregate.MinimumDirectionDots, Metric.Key, Metric.Value);
+				}
+				for (const TPair<FString, double>& Metric : Summary.MinimumHandBasisDots)
+				{
+					AccumulateMinimumMetric(Aggregate.MinimumHandBasisDots, Metric.Key, Metric.Value);
+				}
+				for (const TPair<FString, double>& Metric : Summary.MaximumWorldPositionErrors)
+				{
+					AccumulateMaximumMetric(Aggregate.MaximumWorldPositionErrors, Metric.Key, Metric.Value);
+				}
+				for (const TPair<FString, double>& Metric : Summary.MaximumRootMotionDeltaErrors)
+				{
+					AccumulateMaximumMetric(Aggregate.MaximumRootMotionDeltaErrors, Metric.Key, Metric.Value);
+				}
+				for (const TPair<FString, double>& Metric : Summary.MinimumRotationForwardDots)
+				{
+					AccumulateMinimumMetric(Aggregate.MinimumRotationForwardDots, Metric.Key, Metric.Value);
+				}
+			}
+
+			return Aggregate;
 		}
 
 		static void BuildChildBonesByParent(const TMap<FString, FString>& ParentByBone, TMap<FString, TArray<FString>>& OutChildBonesByParent)
@@ -298,7 +677,7 @@ namespace
 			}
 		}
 
-		static void ApplyComponentRotationRebaseToSubtree(
+		static void ApplyComponentRotationRebaseToSubtreeLocal(
 			const FString& RootBoneName,
 			const FQuat& RotationDelta,
 			const TMap<FString, TArray<FString>>& ChildBonesByParent,
@@ -344,7 +723,7 @@ namespace
 			BuildChildBonesByParent(ParentByBone, ChildBonesByParent);
 			for (const TPair<FString, FQuat>& Pair : ComponentRotationRebaseByBone)
 			{
-				ApplyComponentRotationRebaseToSubtree(Pair.Key, Pair.Value, ChildBonesByParent, InOutWorldByBone);
+				ApplyComponentRotationRebaseToSubtreeLocal(Pair.Key, Pair.Value, ChildBonesByParent, InOutWorldByBone);
 			}
 		}
 
@@ -471,6 +850,129 @@ namespace
 		return RefSkeleton.FindBoneIndex(FName(BoneName));
 	}
 
+	static void BuildReferenceWorldPose(const FReferenceSkeleton& RefSkeleton, TArray<FTransform>& OutWorldPose)
+	{
+		const TArray<FTransform>& RefPose = RefSkeleton.GetRefBonePose();
+		OutWorldPose.SetNum(RefSkeleton.GetNum());
+		for (int32 BoneIndex = 0; BoneIndex < RefSkeleton.GetNum(); ++BoneIndex)
+		{
+			const int32 ParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
+			OutWorldPose[BoneIndex] = ParentIndex == INDEX_NONE
+				? RefPose[BoneIndex]
+				: RefPose[BoneIndex] * OutWorldPose[ParentIndex];
+		}
+	}
+
+	static double ComputeMatrixMaxAbsError(const FMatrix& Left, const FMatrix& Right)
+	{
+		double MaximumError = 0.0;
+		for (int32 RowIndex = 0; RowIndex < 4; ++RowIndex)
+		{
+			for (int32 ColumnIndex = 0; ColumnIndex < 4; ++ColumnIndex)
+			{
+				MaximumError = FMath::Max(MaximumError, FMath::Abs(static_cast<double>(Left.M[RowIndex][ColumnIndex] - Right.M[RowIndex][ColumnIndex])));
+			}
+		}
+		return MaximumError;
+	}
+
+	static const TArray<TPair<const TCHAR*, const TCHAR*>>& GetSkeletalMeshInverseBindMetricBones()
+	{
+		static const TArray<TPair<const TCHAR*, const TCHAR*>> Metrics = {
+			{ TEXT("master"), TEXT("Master") },
+			{ TEXT("pelvis"), TEXT("Pelvis") },
+			{ TEXT("head"), TEXT("Head") },
+			{ TEXT("left_clavicle"), TEXT("L_Clavicle") },
+			{ TEXT("left_upperarm"), TEXT("L_UpperArm") },
+			{ TEXT("left_forearm"), TEXT("L_Forearm") },
+			{ TEXT("left_hand"), TEXT("L_Hand") },
+			{ TEXT("right_clavicle"), TEXT("R_Clavicle") },
+			{ TEXT("right_upperarm"), TEXT("R_UpperArm") },
+			{ TEXT("right_forearm"), TEXT("R_Forearm") },
+			{ TEXT("right_hand"), TEXT("R_Hand") },
+		};
+		return Metrics;
+	}
+
+	static TMap<FString, double> GetSkeletalMeshInverseBindErrorThresholds()
+	{
+		TMap<FString, double> Thresholds;
+		for (const TPair<const TCHAR*, const TCHAR*>& Metric : GetSkeletalMeshInverseBindMetricBones())
+		{
+			Thresholds.Add(Metric.Key, 0.001);
+		}
+		return Thresholds;
+	}
+
+	static void RebuildImportedSkeletalMeshInverseBindMatrices(USkeletalMesh* SkeletalMesh)
+	{
+		if (!SkeletalMesh)
+		{
+			return;
+		}
+
+		SkeletalMesh->CalculateInvRefMatrices();
+		SkeletalMesh->MarkPackageDirty();
+	}
+
+	static void ValidateSkeletalMeshSkinBinding(
+		USkeletalMesh* SkeletalMesh,
+		FSkeletalMeshValidationSummary& OutSummary,
+		TArray<FString>& Errors)
+	{
+		OutSummary = FSkeletalMeshValidationSummary();
+		if (!SkeletalMesh)
+		{
+			Errors.Add(TEXT("normalized skeletal mesh missing after model import"));
+			return;
+		}
+
+		const FReferenceSkeleton& RefSkeleton = SkeletalMesh->GetRefSkeleton();
+		if (RefSkeleton.GetNum() == 0)
+		{
+			Errors.Add(TEXT("normalized skeletal mesh reference skeleton was empty"));
+			return;
+		}
+
+		const TArray<FMatrix44f>& RefBasesInvMatrix = SkeletalMesh->GetRefBasesInvMatrix();
+		if (RefBasesInvMatrix.Num() != RefSkeleton.GetNum())
+		{
+			Errors.Add(FString::Printf(TEXT("normalized skeletal mesh inverse bind matrix count mismatch: expected %d but got %d"), RefSkeleton.GetNum(), RefBasesInvMatrix.Num()));
+			return;
+		}
+
+		TArray<FTransform> WorldPose;
+		BuildReferenceWorldPose(RefSkeleton, WorldPose);
+		const TMap<FString, double> Thresholds = GetSkeletalMeshInverseBindErrorThresholds();
+		bool bAllRepresentativeMetricsValid = true;
+		for (const TPair<const TCHAR*, const TCHAR*>& Metric : GetSkeletalMeshInverseBindMetricBones())
+		{
+			const int32 BoneIndex = FindExactBoneIndex(RefSkeleton, Metric.Value);
+			if (BoneIndex == INDEX_NONE)
+			{
+				continue;
+			}
+
+			const FMatrix ExpectedInverseBindMatrix = WorldPose[BoneIndex].ToMatrixWithScale().InverseFast();
+			const FMatrix ActualInverseBindMatrix = FMatrix(RefBasesInvMatrix[BoneIndex]);
+			const double MaximumMatrixError = ComputeMatrixMaxAbsError(ExpectedInverseBindMatrix, ActualInverseBindMatrix);
+			OutSummary.MaximumInverseBindMatrixErrors.Add(Metric.Key, MaximumMatrixError);
+			const double* Threshold = Thresholds.Find(Metric.Key);
+			if (!Threshold)
+			{
+				continue;
+			}
+
+			if (MaximumMatrixError > *Threshold)
+			{
+				bAllRepresentativeMetricsValid = false;
+				Errors.Add(FString::Printf(TEXT("normalized skeletal mesh inverse bind mismatch for '%s' (bone '%s'): max matrix error %.6f exceeded threshold %.6f"), Metric.Key, Metric.Value, MaximumMatrixError, *Threshold));
+			}
+		}
+
+		OutSummary.bSkinBindingValidated = bAllRepresentativeMetricsValid;
+	}
+
 	static void AddBoneIfPresent(const FReferenceSkeleton& RefSkeleton, const TCHAR* BoneName, TArray<int32>& Chain)
 	{
 		const int32 BoneIndex = FindExactBoneIndex(RefSkeleton, BoneName);
@@ -564,7 +1066,7 @@ namespace
 		}
 	}
 
-	static void ValidateNormalizedHumanoidAssets(USkeleton* Skeleton, USkeletalMesh* SkeletalMesh, TArray<FString>& Errors)
+	static void ValidateNormalizedHumanoidAssets(USkeleton* Skeleton, USkeletalMesh* SkeletalMesh, FSkeletalMeshValidationSummary& MeshValidationSummary, TArray<FString>& Errors)
 	{
 		if (!Skeleton)
 		{
@@ -583,16 +1085,8 @@ namespace
 			return;
 		}
 
-		const TArray<FTransform>& RefPose = RefSkeleton.GetRefBonePose();
 		TArray<FTransform> WorldPose;
-		WorldPose.SetNum(RefSkeleton.GetNum());
-		for (int32 BoneIndex = 0; BoneIndex < RefSkeleton.GetNum(); ++BoneIndex)
-		{
-			const int32 ParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
-			WorldPose[BoneIndex] = ParentIndex == INDEX_NONE
-				? RefPose[BoneIndex]
-				: RefPose[BoneIndex] * WorldPose[ParentIndex];
-		}
+		BuildReferenceWorldPose(RefSkeleton, WorldPose);
 
 		if (WorldPose[HeadIndex].GetLocation().Z <= WorldPose[PelvisIndex].GetLocation().Z)
 		{
@@ -601,14 +1095,14 @@ namespace
 
 		const int32 LeftHandIndex = FindExactBoneIndex(RefSkeleton, TEXT("L_Hand"));
 		const int32 RightHandIndex = FindExactBoneIndex(RefSkeleton, TEXT("R_Hand"));
-		const int32 LeftShoulderIndex = FindExactBoneIndex(RefSkeleton, TEXT("L_Shoulder"));
-		const int32 RightShoulderIndex = FindExactBoneIndex(RefSkeleton, TEXT("R_Shoulder"));
-		if (LeftShoulderIndex != INDEX_NONE && RightShoulderIndex != INDEX_NONE)
+		const int32 LeftClavicleIndex = FindExactBoneIndex(RefSkeleton, TEXT("L_Clavicle"));
+		const int32 RightClavicleIndex = FindExactBoneIndex(RefSkeleton, TEXT("R_Clavicle"));
+		if (LeftClavicleIndex != INDEX_NONE && RightClavicleIndex != INDEX_NONE)
 		{
-			UE_LOG(LogTemp, Display, TEXT("  Imported world shoulders: L=%s R=%s Delta=%s"),
-				*WorldPose[LeftShoulderIndex].GetLocation().ToString(),
-				*WorldPose[RightShoulderIndex].GetLocation().ToString(),
-				*(WorldPose[LeftShoulderIndex].GetLocation() - WorldPose[RightShoulderIndex].GetLocation()).ToString());
+			UE_LOG(LogTemp, Display, TEXT("  Imported world clavicles: L=%s R=%s Delta=%s"),
+				*WorldPose[LeftClavicleIndex].GetLocation().ToString(),
+				*WorldPose[RightClavicleIndex].GetLocation().ToString(),
+				*(WorldPose[LeftClavicleIndex].GetLocation() - WorldPose[RightClavicleIndex].GetLocation()).ToString());
 		}
 		if (LeftHandIndex != INDEX_NONE && RightHandIndex != INDEX_NONE)
 		{
@@ -623,9 +1117,9 @@ namespace
 			}
 		}
 
-		if (LeftShoulderIndex != INDEX_NONE && RightShoulderIndex != INDEX_NONE)
+		if (LeftClavicleIndex != INDEX_NONE && RightClavicleIndex != INDEX_NONE)
 		{
-			FVector ImportedLateralAxis = WorldPose[LeftShoulderIndex].GetLocation() - WorldPose[RightShoulderIndex].GetLocation();
+			FVector ImportedLateralAxis = WorldPose[LeftClavicleIndex].GetLocation() - WorldPose[RightClavicleIndex].GetLocation();
 			if (ImportedLateralAxis.Normalize())
 			{
 				const FVector ImportedUpAxis = (WorldPose[HeadIndex].GetLocation() - WorldPose[PelvisIndex].GetLocation()).GetSafeNormal();
@@ -641,6 +1135,8 @@ namespace
 		{
 			Errors.Add(TEXT("normalized skeletal mesh was imported with the wrong skeleton binding"));
 		}
+
+		ValidateSkeletalMeshSkinBinding(SkeletalMesh, MeshValidationSummary, Errors);
 	}
 
 	static void LogSectionDominantBonesByMaterial(USkeletalMesh* SkeletalMesh)
@@ -878,8 +1374,20 @@ namespace
 
 		TArray<UE::Interchange::FAnimationPayloadData> Payloads = AnimationPayloadInterface->GetAnimationPayloadData(Queries);
 		TMap<FString, UE::Interchange::FAnimationPayloadData> PayloadByNodeUid;
+		TSet<FString> BonesWithPayload;
+		TSet<FString> BonesWithSynthesizedPayload;
 		for (UE::Interchange::FAnimationPayloadData& Payload : Payloads)
 		{
+			FString PayloadBoneName;
+			for (const TPair<FString, const UInterchangeSceneNode*>& BonePair : SceneNodesByBoneName)
+			{
+				if (BonePair.Value && BonePair.Value->GetUniqueID() == Payload.SceneNodeUniqueID)
+				{
+					PayloadBoneName = BonePair.Key;
+					break;
+				}
+			}
+
 			if (Payload.PayloadKey.Type != EInterchangeAnimationPayLoadType::BAKED || Payload.Transforms.Num() == 0)
 			{
 				FTransform DefaultTransform = FTransform::Identity;
@@ -895,8 +1403,16 @@ namespace
 					}
 				}
 				Payload.CalculateDataFor(EInterchangeAnimationPayLoadType::BAKED, DefaultTransform);
+				if (!PayloadBoneName.IsEmpty())
+				{
+					BonesWithSynthesizedPayload.Add(PayloadBoneName);
+				}
 			}
 
+			if (!PayloadBoneName.IsEmpty())
+			{
+				BonesWithPayload.Add(PayloadBoneName);
+			}
 			PayloadByNodeUid.Add(Payload.SceneNodeUniqueID, MoveTemp(Payload));
 		}
 
@@ -905,7 +1421,6 @@ namespace
 		{
 			TotalKeys = FMath::Max(TotalKeys, Pair.Value.Transforms.Num());
 		}
-
 		if (TotalKeys <= 1)
 		{
 			OutErrors.Add(FString::Printf(TEXT("translated animation '%s' did not yield any baked bone keys"), *FPaths::GetCleanFilename(FilePath)));
@@ -944,9 +1459,37 @@ namespace
 			ScaleKeysByBone.SetNum(TargetRefSkeleton.GetNum());
 
 			TMap<FString, double> MinimumDirectionDots;
+			TSet<FString> SourceDirectionMetrics;
 			TSet<FString> SeenDirectionMetrics;
 			TMap<FString, double> MinimumHandBasisDots;
+			TSet<FString> SourceHandBasisMetrics;
 			TSet<FString> SeenHandBasisMetrics;
+			TMap<FString, double> MaximumWorldPositionErrors;
+			TSet<FString> SeenWorldPositionMetrics;
+			TMap<FString, double> MaximumRootMotionDeltaErrors;
+			TSet<FString> SeenRootMotionMetrics;
+			TMap<FString, double> MinimumRotationForwardDots;
+			TSet<FString> SeenRotationMetrics;
+			TMap<FString, FVector> PreviousSourceLocations;
+			TMap<FString, FVector> PreviousTargetLocations;
+
+			if (OutValidationSummary)
+			{
+				OutValidationSummary->ExpectedPayloadBoneCount = NormalizationData.BoneOrder.Num();
+				OutValidationSummary->PayloadBoneCount = BonesWithPayload.Num();
+				OutValidationSummary->SynthesizedPayloadBoneCount = BonesWithSynthesizedPayload.Num();
+				for (const FString& BoneName : NormalizationData.BoneOrder)
+				{
+					if (!BonesWithPayload.Contains(BoneName))
+					{
+						OutValidationSummary->MissingPayloadBones.Add(BoneName);
+					}
+					if (BonesWithSynthesizedPayload.Contains(BoneName))
+					{
+						OutValidationSummary->SynthesizedPayloadBones.Add(BoneName);
+					}
+				}
+			}
 
 			for (int32 FrameIndex = 0; FrameIndex < TotalKeys; ++FrameIndex)
 			{
@@ -1012,9 +1555,46 @@ namespace
 						SourceNormalizedWorldByBone,
 						TargetWorldByBone,
 						MinimumDirectionDots,
+						SourceDirectionMetrics,
 						SeenDirectionMetrics,
 						MinimumHandBasisDots,
-						SeenHandBasisMetrics);
+						SourceHandBasisMetrics,
+						SeenHandBasisMetrics,
+						MaximumWorldPositionErrors,
+						SeenWorldPositionMetrics,
+						MaximumRootMotionDeltaErrors,
+						SeenRootMotionMetrics,
+						MinimumRotationForwardDots,
+						SeenRotationMetrics,
+						PreviousSourceLocations,
+						PreviousTargetLocations);
+
+					for (const FWorldPositionMetricSpec& Metric : GetImportAnimationWorldPositionMetrics())
+					{
+						FVector SourceTranslation = FVector::ZeroVector;
+						FVector TargetTranslation = FVector::ZeroVector;
+						if (TryGetBoneTranslationByAliases(SourceNormalizedWorldByBone, Metric.BoneName, Metric.AlternateBoneName, SourceTranslation))
+						{
+							PreviousSourceLocations.Add(Metric.BoneName, SourceTranslation);
+						}
+						if (TryGetBoneTranslationByAliases(TargetWorldByBone, Metric.BoneName, Metric.AlternateBoneName, TargetTranslation))
+						{
+							PreviousTargetLocations.Add(Metric.BoneName, TargetTranslation);
+						}
+					}
+					for (const TCHAR* RootBoneName : { TEXT("Master"), TEXT("Pelvis") })
+					{
+						FVector SourceTranslation = FVector::ZeroVector;
+						FVector TargetTranslation = FVector::ZeroVector;
+						if (TryGetBoneTranslation(SourceNormalizedWorldByBone, RootBoneName, SourceTranslation))
+						{
+							PreviousSourceLocations.Add(RootBoneName, SourceTranslation);
+						}
+						if (TryGetBoneTranslation(TargetWorldByBone, RootBoneName, TargetTranslation))
+						{
+							PreviousTargetLocations.Add(RootBoneName, TargetTranslation);
+						}
+					}
 				}
 			}
 
@@ -1030,7 +1610,20 @@ namespace
 
 			if (OutValidationSummary)
 			{
-				FinalizeImportedAnimationValidation(*OutValidationSummary, MinimumDirectionDots, SeenDirectionMetrics, MinimumHandBasisDots, SeenHandBasisMetrics);
+				FinalizeImportedAnimationValidation(
+					*OutValidationSummary,
+					MinimumDirectionDots,
+					SourceDirectionMetrics,
+					SeenDirectionMetrics,
+					MinimumHandBasisDots,
+					SourceHandBasisMetrics,
+					SeenHandBasisMetrics,
+					MaximumWorldPositionErrors,
+					SeenWorldPositionMetrics,
+					MaximumRootMotionDeltaErrors,
+					SeenRootMotionMetrics,
+					MinimumRotationForwardDots,
+					SeenRotationMetrics);
 			}
 		return true;
 	}
@@ -1207,6 +1800,74 @@ namespace
 		return Result;
 	}
 
+	static const TArray<FString>& GetCanonicalC0000Preview17AnimationNames()
+	{
+		static const TArray<FString> Names = {
+			TEXT("a000_201030"),
+			TEXT("a000_201050"),
+			TEXT("a000_202010"),
+			TEXT("a000_202011"),
+			TEXT("a000_202012"),
+			TEXT("a000_202035"),
+			TEXT("a000_202100"),
+			TEXT("a000_202110"),
+			TEXT("a000_202112"),
+			TEXT("a000_202300"),
+			TEXT("a000_202310"),
+			TEXT("a000_202400"),
+			TEXT("a000_202410"),
+			TEXT("a000_202600"),
+			TEXT("a000_202610"),
+			TEXT("a000_202700"),
+			TEXT("a000_202710"),
+		};
+		return Names;
+	}
+
+	static FString JoinCsvPatterns(const TArray<FString>& Patterns)
+	{
+		FString Result;
+		for (int32 Index = 0; Index < Patterns.Num(); ++Index)
+		{
+			if (Index > 0)
+			{
+				Result += TEXT(",");
+			}
+
+			Result += Patterns[Index];
+		}
+
+		return Result;
+	}
+
+	static bool MatchesNamedAnimationSelection(const TArray<FString>& AnimFilters, const TArray<FString>& NamedSelection)
+	{
+		if (AnimFilters.Num() != NamedSelection.Num())
+		{
+			return false;
+		}
+
+		for (const FString& NamedAnimation : NamedSelection)
+		{
+			bool bFound = false;
+			for (const FString& Filter : AnimFilters)
+			{
+				if (Filter.Equals(NamedAnimation, ESearchCase::IgnoreCase))
+				{
+					bFound = true;
+					break;
+				}
+			}
+
+			if (!bFound)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	static bool MatchesAnimationFilter(const FString& AnimationName, const TArray<FString>& AnimFilters)
 	{
 		if (AnimFilters.Num() == 0)
@@ -1247,6 +1908,7 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	FString ExportDir;
 	FString ChrFilterStr;
 	FString AnimFilterStr;
+	FString AnimFilterPresetStr;
 	FString ContentBase = TEXT("/Game/SekiroAssets/Characters");
 	int32 AnimLimit = -1;
 	bool bImportAnimationsOnly = false;
@@ -1271,8 +1933,26 @@ int32 USekiroImportCommandlet::Main(const FString& Params)
 	if (ParamsMap.Contains(TEXT("AnimFilter")))
 		AnimFilterStr = ParamsMap[TEXT("AnimFilter")];
 
+	if (ParamsMap.Contains(TEXT("AnimFilterPreset")))
+		AnimFilterPresetStr = ParamsMap[TEXT("AnimFilterPreset")];
+
 	if (ParamsMap.Contains(TEXT("AnimLimit")))
 		AnimLimit = FCString::Atoi(*ParamsMap[TEXT("AnimLimit")]);
+
+	const bool bCanonical17Only = FParse::Param(*Params, TEXT("Canonical17Only"))
+		|| (ParamsMap.Contains(TEXT("Canonical17Only")) && ParamsMap[TEXT("Canonical17Only")].Equals(TEXT("true"), ESearchCase::IgnoreCase))
+		|| AnimFilterPresetStr.Equals(TEXT("Canonical17"), ESearchCase::IgnoreCase)
+		|| AnimFilterPresetStr.Equals(TEXT("CanonicalC0000Preview17"), ESearchCase::IgnoreCase);
+
+	if (AnimFilterStr.IsEmpty() && bCanonical17Only)
+	{
+		AnimFilterStr = JoinCsvPatterns(GetCanonicalC0000Preview17AnimationNames());
+		UE_LOG(LogTemp, Display, TEXT("Using canonical c0000 preview 17 animation preset"));
+	}
+	else if (!AnimFilterStr.IsEmpty() && bCanonical17Only)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Canonical17Only/AnimFilterPreset requested, but explicit AnimFilter takes precedence."));
+	}
 
 	FString ImportAnimationsOnlyValue;
 	bImportAnimationsOnly = FParse::Param(*Params, TEXT("ImportAnimationsOnly"))
@@ -1350,6 +2030,10 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	TArray<FString> Warnings;
 	bool bVisiblePoseValidated = false;
 	USkeletalMesh* ImportedSkeletalMesh = nullptr;
+	const bool bCanonicalPreview17Selection = MatchesNamedAnimationSelection(AnimFilters, GetCanonicalC0000Preview17AnimationNames());
+	const FString AnimationSelectionScope = bCanonicalPreview17Selection
+		? TEXT("canonical-c0000-preview-17")
+		: (AnimFilters.Num() > 0 ? TEXT("custom-filter") : TEXT("full-export"));
 
 	TSharedPtr<FJsonObject> AssetPackage;
 	const FString AssetPackagePath = ExportDir / TEXT("asset_package.json");
@@ -1461,6 +2145,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	}
 
 	const int32 ExpectedAnimationCount = ExpectedAnimationFiles.Num() > 0 ? ExpectedAnimationFiles.Num() : AnimationFiles.Num();
+	FSkeletalMeshValidationSummary SkeletalMeshValidationSummary;
 	if (!bImportModelOnly && MissingAnimationFiles.Num() > 0)
 	{
 		for (const FString& MissingAnimationFile : MissingAnimationFiles)
@@ -1530,13 +2215,14 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 				UE_LOG(LogTemp, Display, TEXT("  Model: OK (SkeletalMesh)"));
 				ImportedSkeletalMesh = SkelMesh;
 				Skeleton = SkelMesh->GetSkeleton();
+				RebuildImportedSkeletalMeshInverseBindMatrices(SkelMesh);
 				SavePackage(SkelMesh);
 				if (Skeleton)
 					SavePackage(Skeleton);
 				if (Skeleton)
 					UE_LOG(LogTemp, Display, TEXT("  Skeleton: %s"), *Skeleton->GetPathName());
 				LogSectionDominantBonesByMaterial(SkelMesh);
-				ValidateNormalizedHumanoidAssets(Skeleton, SkelMesh, Errors);
+				ValidateNormalizedHumanoidAssets(Skeleton, SkelMesh, SkeletalMeshValidationSummary, Errors);
 				bVisiblePoseValidated = true;
 			}
 			else
@@ -1549,6 +2235,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 				Skeleton = FindSkeletonInPackage(MeshContentPath);
 				if (ImportedSkelMesh)
 				{
+					RebuildImportedSkeletalMeshInverseBindMatrices(ImportedSkelMesh);
 					SavePackage(ImportedSkelMesh);
 				}
 				if (Skeleton)
@@ -1558,7 +2245,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 				if (Skeleton)
 					UE_LOG(LogTemp, Display, TEXT("  Skeleton found: %s"), *Skeleton->GetPathName());
 				LogSectionDominantBonesByMaterial(ImportedSkelMesh);
-				ValidateNormalizedHumanoidAssets(Skeleton, ImportedSkelMesh, Errors);
+				ValidateNormalizedHumanoidAssets(Skeleton, ImportedSkelMesh, SkeletalMeshValidationSummary, Errors);
 				bVisiblePoseValidated = true;
 			}
 		}
@@ -1736,7 +2423,7 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	}
 
 	TSharedPtr<FJsonObject> ReportObject = MakeShared<FJsonObject>();
-	ReportObject->SetStringField(TEXT("schemaVersion"), TEXT("2.1"));
+	ReportObject->SetStringField(TEXT("schemaVersion"), TEXT("2.4"));
 	ReportObject->SetStringField(TEXT("characterId"), ChrId);
 	ReportObject->SetStringField(TEXT("deliveryMode"), TEXT("formal-only"));
 	ReportObject->SetBoolField(TEXT("modelImported"), !ModelFile.IsEmpty() && Skeleton != nullptr);
@@ -1746,6 +2433,20 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	ReportObject->SetNumberField(TEXT("expectedAnimationCount"), ExpectedAnimationCount);
 	ReportObject->SetNumberField(TEXT("animationCount"), AnimCount);
 	ReportObject->SetBoolField(TEXT("hasPhysicsAsset"), ImportedSkeletalMesh != nullptr && ImportedSkeletalMesh->GetPhysicsAsset() != nullptr);
+
+	TSharedPtr<FJsonObject> AnimationSelectionObject = MakeShared<FJsonObject>();
+	AnimationSelectionObject->SetStringField(TEXT("scope"), AnimationSelectionScope);
+	AnimationSelectionObject->SetBoolField(TEXT("isCanonicalC0000Preview17"), bCanonicalPreview17Selection);
+	AnimationSelectionObject->SetNumberField(TEXT("filterCount"), AnimFilters.Num());
+	AnimationSelectionObject->SetNumberField(TEXT("selectedAnimationCount"), AnimationFiles.Num());
+	AnimationSelectionObject->SetNumberField(TEXT("expectedSelectedAnimationCount"), ExpectedAnimationCount);
+	TArray<TSharedPtr<FJsonValue>> RequestedFilterValues;
+	for (const FString& AnimFilter : AnimFilters)
+	{
+		RequestedFilterValues.Add(MakeShared<FJsonValueString>(AnimFilter));
+	}
+	AnimationSelectionObject->SetArrayField(TEXT("requestedFilters"), RequestedFilterValues);
+	ReportObject->SetObjectField(TEXT("animationSelection"), AnimationSelectionObject);
 
 	// Resource relationship tracking
 	TSharedPtr<FJsonObject> RelationshipsObject = MakeShared<FJsonObject>();
@@ -1779,10 +2480,45 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	ReportObject->SetArrayField(TEXT("missingAnimationFiles"), MissingAnimValues);
 
 	TSharedPtr<FJsonObject> PostImportChecksObject = MakeShared<FJsonObject>();
+	bool bAnimationPayloadCoverageValidated = true;
+	bool bAnimationWorldSpaceSemanticsValidated = true;
+	bool bRepresentativeAuxiliaryBranchesValidated = true;
+	const FImportedAnimationValidationAggregate AnimationValidationAggregate = AggregateImportedAnimationValidationSummaries(AnimationValidationSummaries);
+	for (const FImportedAnimationValidationSummary& Summary : AnimationValidationSummaries)
+	{
+		bAnimationPayloadCoverageValidated = bAnimationPayloadCoverageValidated
+			&& Summary.MissingPayloadBones.Num() == 0
+			&& Summary.SynthesizedPayloadBones.Num() == 0;
+		bAnimationWorldSpaceSemanticsValidated = bAnimationWorldSpaceSemanticsValidated && Summary.bSuccess;
+		bRepresentativeAuxiliaryBranchesValidated = bRepresentativeAuxiliaryBranchesValidated
+			&& Summary.MaximumWorldPositionErrors.Contains(TEXT("left_clavicle"))
+			&& Summary.MaximumWorldPositionErrors.Contains(TEXT("right_clavicle"));
+	}
 	PostImportChecksObject->SetBoolField(TEXT("animationBranchBasisValidated"), bAnimationBranchBasisValidated);
+	PostImportChecksObject->SetBoolField(TEXT("animationPayloadCoverageValidated"), bAnimationPayloadCoverageValidated);
+	PostImportChecksObject->SetBoolField(TEXT("animationWorldSpaceSemanticsValidated"), bAnimationWorldSpaceSemanticsValidated);
+	PostImportChecksObject->SetBoolField(TEXT("skeletalMeshSkinBindingValidated"), SkeletalMeshValidationSummary.bSkinBindingValidated);
+	PostImportChecksObject->SetBoolField(TEXT("representativeAuxiliaryBranchesValidated"), bRepresentativeAuxiliaryBranchesValidated);
+	PostImportChecksObject->SetBoolField(TEXT("normalizedAssetsRequiredForSuccess"), true);
+	PostImportChecksObject->SetBoolField(TEXT("legacyRawAssetFallbackAccepted"), false);
 	PostImportChecksObject->SetBoolField(TEXT("rtgDiagnosticsRequiredForSuccess"), false);
 	PostImportChecksObject->SetStringField(TEXT("rtgDiagnosticsRole"), TEXT("post-import-only"));
 	ReportObject->SetObjectField(TEXT("postImportChecks"), PostImportChecksObject);
+
+	TSharedPtr<FJsonObject> SkeletalMeshValidationObject = MakeShared<FJsonObject>();
+	TSharedPtr<FJsonObject> InverseBindThresholdsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Threshold : GetSkeletalMeshInverseBindErrorThresholds())
+	{
+		InverseBindThresholdsObject->SetNumberField(Threshold.Key, Threshold.Value);
+	}
+	SkeletalMeshValidationObject->SetObjectField(TEXT("inverseBindMatrixErrorThresholds"), InverseBindThresholdsObject);
+	TSharedPtr<FJsonObject> InverseBindErrorsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Entry : SkeletalMeshValidationSummary.MaximumInverseBindMatrixErrors)
+	{
+		InverseBindErrorsObject->SetNumberField(Entry.Key, Entry.Value);
+	}
+	SkeletalMeshValidationObject->SetObjectField(TEXT("maximumInverseBindMatrixErrors"), InverseBindErrorsObject);
+	ReportObject->SetObjectField(TEXT("skeletalMeshValidation"), SkeletalMeshValidationObject);
 
 	TSharedPtr<FJsonObject> AnimationValidationObject = MakeShared<FJsonObject>();
 	TSharedPtr<FJsonObject> DirectionThresholdsObject = MakeShared<FJsonObject>();
@@ -1799,12 +2535,36 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	}
 	AnimationValidationObject->SetObjectField(TEXT("handBasisThresholds"), HandBasisThresholdsObject);
 
+	TSharedPtr<FJsonObject> WorldPositionThresholdsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Threshold : GetImportAnimationWorldPositionErrorThresholds())
+	{
+		WorldPositionThresholdsObject->SetNumberField(Threshold.Key, Threshold.Value);
+	}
+	AnimationValidationObject->SetObjectField(TEXT("worldPositionErrorThresholds"), WorldPositionThresholdsObject);
+
+	TSharedPtr<FJsonObject> RootMotionThresholdsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Threshold : GetImportAnimationRootMotionDeltaErrorThresholds())
+	{
+		RootMotionThresholdsObject->SetNumberField(Threshold.Key, Threshold.Value);
+	}
+	AnimationValidationObject->SetObjectField(TEXT("rootMotionDeltaErrorThresholds"), RootMotionThresholdsObject);
+
+	TSharedPtr<FJsonObject> RotationThresholdsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Threshold : GetImportAnimationRotationForwardThresholds())
+	{
+		RotationThresholdsObject->SetNumberField(Threshold.Key, Threshold.Value);
+	}
+	AnimationValidationObject->SetObjectField(TEXT("rotationForwardThresholds"), RotationThresholdsObject);
+
 	TArray<TSharedPtr<FJsonValue>> AnimationValidationClipValues;
 	for (const FImportedAnimationValidationSummary& ValidationSummary : AnimationValidationSummaries)
 	{
 		TSharedPtr<FJsonObject> ClipObject = MakeShared<FJsonObject>();
 		ClipObject->SetStringField(TEXT("clip"), ValidationSummary.ClipName);
 		ClipObject->SetBoolField(TEXT("success"), ValidationSummary.bSuccess);
+		ClipObject->SetNumberField(TEXT("expectedPayloadBoneCount"), ValidationSummary.ExpectedPayloadBoneCount);
+		ClipObject->SetNumberField(TEXT("payloadBoneCount"), ValidationSummary.PayloadBoneCount);
+		ClipObject->SetNumberField(TEXT("synthesizedPayloadBoneCount"), ValidationSummary.SynthesizedPayloadBoneCount);
 
 		TSharedPtr<FJsonObject> MinimumDirectionDotsObject = MakeShared<FJsonObject>();
 		for (const TPair<FString, double>& Metric : ValidationSummary.MinimumDirectionDots)
@@ -1820,6 +2580,41 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 		}
 		ClipObject->SetObjectField(TEXT("minimumHandBasisDots"), MinimumHandBasisDotsObject);
 
+		TSharedPtr<FJsonObject> MaximumWorldPositionErrorsObject = MakeShared<FJsonObject>();
+		for (const TPair<FString, double>& Metric : ValidationSummary.MaximumWorldPositionErrors)
+		{
+			MaximumWorldPositionErrorsObject->SetNumberField(Metric.Key, Metric.Value);
+		}
+		ClipObject->SetObjectField(TEXT("maximumWorldPositionErrors"), MaximumWorldPositionErrorsObject);
+
+		TSharedPtr<FJsonObject> MaximumRootMotionDeltaErrorsObject = MakeShared<FJsonObject>();
+		for (const TPair<FString, double>& Metric : ValidationSummary.MaximumRootMotionDeltaErrors)
+		{
+			MaximumRootMotionDeltaErrorsObject->SetNumberField(Metric.Key, Metric.Value);
+		}
+		ClipObject->SetObjectField(TEXT("maximumRootMotionDeltaErrors"), MaximumRootMotionDeltaErrorsObject);
+
+		TSharedPtr<FJsonObject> MinimumRotationForwardDotsObject = MakeShared<FJsonObject>();
+		for (const TPair<FString, double>& Metric : ValidationSummary.MinimumRotationForwardDots)
+		{
+			MinimumRotationForwardDotsObject->SetNumberField(Metric.Key, Metric.Value);
+		}
+		ClipObject->SetObjectField(TEXT("minimumRotationForwardDots"), MinimumRotationForwardDotsObject);
+
+		TArray<TSharedPtr<FJsonValue>> MissingPayloadBoneValues;
+		for (const FString& BoneName : ValidationSummary.MissingPayloadBones)
+		{
+			MissingPayloadBoneValues.Add(MakeShared<FJsonValueString>(BoneName));
+		}
+		ClipObject->SetArrayField(TEXT("missingPayloadBones"), MissingPayloadBoneValues);
+
+		TArray<TSharedPtr<FJsonValue>> SynthesizedPayloadBoneValues;
+		for (const FString& BoneName : ValidationSummary.SynthesizedPayloadBones)
+		{
+			SynthesizedPayloadBoneValues.Add(MakeShared<FJsonValueString>(BoneName));
+		}
+		ClipObject->SetArrayField(TEXT("synthesizedPayloadBones"), SynthesizedPayloadBoneValues);
+
 		TArray<TSharedPtr<FJsonValue>> ClipIssueValues;
 		for (const FString& Issue : ValidationSummary.Issues)
 		{
@@ -1830,6 +2625,71 @@ void USekiroImportCommandlet::ImportCharacter(const FString& ChrId, const FStrin
 	}
 	AnimationValidationObject->SetArrayField(TEXT("clips"), AnimationValidationClipValues);
 	ReportObject->SetObjectField(TEXT("animationValidation"), AnimationValidationObject);
+
+	TSharedPtr<FJsonObject> SelfAnimationValidationObject = MakeShared<FJsonObject>();
+	SelfAnimationValidationObject->SetNumberField(TEXT("clipCount"), AnimationValidationAggregate.ClipCount);
+	SelfAnimationValidationObject->SetNumberField(TEXT("passedClipCount"), AnimationValidationAggregate.PassedClipCount);
+	SelfAnimationValidationObject->SetNumberField(TEXT("failedClipCount"), AnimationValidationAggregate.FailedClipCount);
+	SelfAnimationValidationObject->SetNumberField(TEXT("expectedPayloadBoneCount"), AnimationValidationAggregate.ExpectedPayloadBoneCount);
+	SelfAnimationValidationObject->SetNumberField(TEXT("payloadBoneCount"), AnimationValidationAggregate.PayloadBoneCount);
+	SelfAnimationValidationObject->SetNumberField(TEXT("synthesizedPayloadBoneCount"), AnimationValidationAggregate.SynthesizedPayloadBoneCount);
+
+	TArray<TSharedPtr<FJsonValue>> FailedClipValues;
+	for (const FString& ClipName : AnimationValidationAggregate.FailedClips)
+	{
+		FailedClipValues.Add(MakeShared<FJsonValueString>(ClipName));
+	}
+	SelfAnimationValidationObject->SetArrayField(TEXT("failedClips"), FailedClipValues);
+
+	TArray<TSharedPtr<FJsonValue>> MissingPayloadClipValues;
+	for (const FString& ClipName : AnimationValidationAggregate.ClipsWithMissingPayload)
+	{
+		MissingPayloadClipValues.Add(MakeShared<FJsonValueString>(ClipName));
+	}
+	SelfAnimationValidationObject->SetArrayField(TEXT("clipsWithMissingPayload"), MissingPayloadClipValues);
+
+	TArray<TSharedPtr<FJsonValue>> SynthesizedFallbackClipValues;
+	for (const FString& ClipName : AnimationValidationAggregate.ClipsWithSynthesizedFallback)
+	{
+		SynthesizedFallbackClipValues.Add(MakeShared<FJsonValueString>(ClipName));
+	}
+	SelfAnimationValidationObject->SetArrayField(TEXT("clipsWithSynthesizedFallback"), SynthesizedFallbackClipValues);
+
+	TSharedPtr<FJsonObject> AggregateMinimumDirectionDotsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Metric : AnimationValidationAggregate.MinimumDirectionDots)
+	{
+		AggregateMinimumDirectionDotsObject->SetNumberField(Metric.Key, Metric.Value);
+	}
+	SelfAnimationValidationObject->SetObjectField(TEXT("minimumDirectionDots"), AggregateMinimumDirectionDotsObject);
+
+	TSharedPtr<FJsonObject> AggregateMinimumHandBasisDotsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Metric : AnimationValidationAggregate.MinimumHandBasisDots)
+	{
+		AggregateMinimumHandBasisDotsObject->SetNumberField(Metric.Key, Metric.Value);
+	}
+	SelfAnimationValidationObject->SetObjectField(TEXT("minimumHandBasisDots"), AggregateMinimumHandBasisDotsObject);
+
+	TSharedPtr<FJsonObject> AggregateMaximumWorldPositionErrorsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Metric : AnimationValidationAggregate.MaximumWorldPositionErrors)
+	{
+		AggregateMaximumWorldPositionErrorsObject->SetNumberField(Metric.Key, Metric.Value);
+	}
+	SelfAnimationValidationObject->SetObjectField(TEXT("maximumWorldPositionErrors"), AggregateMaximumWorldPositionErrorsObject);
+
+	TSharedPtr<FJsonObject> AggregateMaximumRootMotionDeltaErrorsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Metric : AnimationValidationAggregate.MaximumRootMotionDeltaErrors)
+	{
+		AggregateMaximumRootMotionDeltaErrorsObject->SetNumberField(Metric.Key, Metric.Value);
+	}
+	SelfAnimationValidationObject->SetObjectField(TEXT("maximumRootMotionDeltaErrors"), AggregateMaximumRootMotionDeltaErrorsObject);
+
+	TSharedPtr<FJsonObject> AggregateMinimumRotationForwardDotsObject = MakeShared<FJsonObject>();
+	for (const TPair<FString, double>& Metric : AnimationValidationAggregate.MinimumRotationForwardDots)
+	{
+		AggregateMinimumRotationForwardDotsObject->SetNumberField(Metric.Key, Metric.Value);
+	}
+	SelfAnimationValidationObject->SetObjectField(TEXT("minimumRotationForwardDots"), AggregateMinimumRotationForwardDotsObject);
+	ReportObject->SetObjectField(TEXT("selfAnimationValidation"), SelfAnimationValidationObject);
 
 	TArray<TSharedPtr<FJsonValue>> ErrorValues;
 	for (const FString& Error : Errors)
@@ -2038,6 +2898,7 @@ bool USekiroImportCommandlet::SavePackage(UObject* Asset)
 	UPackage* Package = Asset->GetOutermost();
 	if (!Package) return false;
 
+	ResetLoaders(Package);
 	Package->SetDirtyFlag(true);
 	Package->MarkPackageDirty();
 

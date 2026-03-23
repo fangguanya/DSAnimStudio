@@ -122,6 +122,7 @@ namespace
 	{
 		const FString RootBone = ResolveExistingBone(BoneNames, { TEXT("Master"), TEXT("Root"), TEXT("root") });
 		const FString PelvisParent = !RootBone.IsEmpty() ? RootBone : FString();
+		const FString SpineAttachment = ResolveExistingBone(BoneNames, { TEXT("UpperChest"), TEXT("Chest"), TEXT("Spine2"), TEXT("Spine1"), TEXT("Spine") });
 
 		auto SetParent = [&OutTargetParentByBone, &BoneNames](const TCHAR* BoneName, const FString& ParentName)
 		{
@@ -139,6 +140,26 @@ namespace
 		SetParent(TEXT("UpperChest"), ResolveExistingBone(BoneNames, { TEXT("Chest"), TEXT("Spine2"), TEXT("Spine1") }));
 		SetParent(TEXT("Neck"), ResolveExistingBone(BoneNames, { TEXT("UpperChest"), TEXT("Chest"), TEXT("Spine2"), TEXT("Spine1") }));
 		SetParent(TEXT("Head"), ResolveExistingBone(BoneNames, { TEXT("Neck") }));
+		SetParent(TEXT("L_Clavicle"), SpineAttachment);
+		SetParent(TEXT("R_Clavicle"), SpineAttachment);
+		SetParent(TEXT("L_Shoulder"), ResolveExistingBone(BoneNames, { TEXT("L_Clavicle") }));
+		SetParent(TEXT("R_Shoulder"), ResolveExistingBone(BoneNames, { TEXT("R_Clavicle") }));
+		SetParent(TEXT("L_UpperArm"), ResolveExistingBone(BoneNames, { TEXT("L_Clavicle"), TEXT("L_Shoulder") }));
+		SetParent(TEXT("R_UpperArm"), ResolveExistingBone(BoneNames, { TEXT("R_Clavicle"), TEXT("R_Shoulder") }));
+		SetParent(TEXT("L_Forearm"), ResolveExistingBone(BoneNames, { TEXT("L_UpperArm") }));
+		SetParent(TEXT("R_Forearm"), ResolveExistingBone(BoneNames, { TEXT("R_UpperArm") }));
+		SetParent(TEXT("L_Hand"), ResolveExistingBone(BoneNames, { TEXT("L_Forearm") }));
+		SetParent(TEXT("R_Hand"), ResolveExistingBone(BoneNames, { TEXT("R_Forearm") }));
+		SetParent(TEXT("L_Thigh"), ResolveExistingBone(BoneNames, { TEXT("Pelvis") }));
+		SetParent(TEXT("R_Thigh"), ResolveExistingBone(BoneNames, { TEXT("Pelvis") }));
+		SetParent(TEXT("L_Knee"), ResolveExistingBone(BoneNames, { TEXT("L_Thigh") }));
+		SetParent(TEXT("R_Knee"), ResolveExistingBone(BoneNames, { TEXT("R_Thigh") }));
+		SetParent(TEXT("L_Calf"), ResolveExistingBone(BoneNames, { TEXT("L_Thigh"), TEXT("L_Knee") }));
+		SetParent(TEXT("R_Calf"), ResolveExistingBone(BoneNames, { TEXT("R_Thigh"), TEXT("R_Knee") }));
+		SetParent(TEXT("L_Foot"), ResolveExistingBone(BoneNames, { TEXT("L_Calf"), TEXT("L_Knee"), TEXT("L_Thigh") }));
+		SetParent(TEXT("R_Foot"), ResolveExistingBone(BoneNames, { TEXT("R_Calf"), TEXT("R_Knee"), TEXT("R_Thigh") }));
+		SetParent(TEXT("L_Toe0"), ResolveExistingBone(BoneNames, { TEXT("L_Foot") }));
+		SetParent(TEXT("R_Toe0"), ResolveExistingBone(BoneNames, { TEXT("R_Foot") }));
 		SetParent(TEXT("face_root"), ResolveExistingBone(BoneNames, { TEXT("Head"), TEXT("Neck") }));
 	}
 
@@ -351,16 +372,18 @@ namespace
 			}
 		}
 
+		const int32 ErrorCountBefore = OutErrors.Num();
 		RebuildNormalizedLocalAndGlobalFromWorldMap(Data, NormalizedWorldByBone, OutErrors);
-		if (OutErrors.Num() > 0)
+		if (OutErrors.Num() > ErrorCountBefore)
 		{
 			return false;
 		}
 
 		BuildHandComponentRotationRebases(Data);
 		ApplyComponentRotationRebasesToWorldMap(Data, NormalizedWorldByBone);
+		const int32 ErrorCountBeforeSecond = OutErrors.Num();
 		RebuildNormalizedLocalAndGlobalFromWorldMap(Data, NormalizedWorldByBone, OutErrors);
-		if (OutErrors.Num() > 0)
+		if (OutErrors.Num() > ErrorCountBeforeSecond)
 		{
 			return false;
 		}

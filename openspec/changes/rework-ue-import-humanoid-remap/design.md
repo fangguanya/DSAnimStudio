@@ -11,29 +11,79 @@
 
 最近一轮端到端执行把问题进一步收敛了：formal exporter release、17 clip preview re-export、UE import commandlet 重跑、import report host-side 验收和 import-side branch-basis 检查已经跑通；RTG 静态 pose validator 也通过。剩余失败只出现在 RTG 动态动画 validator，并且在把 arm chain 延伸到 hand 之后，之前的 `forearm -> hand` 链段方向失败已经消失，失败收敛为 palm forward、palm lateral 和 palm normal。再结合 importer palm-basis rebase 已把右手 dynamic palm basis 拉回阈值内、左手仍显著低于阈值这一结果，当前观察到的残留问题已经不再像“左右手共用的 generic wrist offset”，而更像“镜像侧 hand / finger subtree 的局部旋转语义仍未完全归一化”。这说明当前观察到的残留问题不是“正式 import 主链没有完成”，而是“RTG 对 wrist/hand 动态旋转语义的观测结果仍显示存在 mirrored-side palm basis 传播不一致”。
 
+除了 RTG 诊断层可见的手臂/手掌问题，formal import 还有另一个必须单独建模的问题：当 mesh 和 skeleton 已经完成正确重映射后，Sekiro 自身动画仍可能表现为“整体完全不匹配”。这类问题不能再被解释为 retarget pose 可视偏差，因为它发生在同一角色、同一 Skeleton、同一导入后的 `UAnimSequence` 上，根因必须回到导入侧动画重算语义本身。当前实现已经具备“读取源动画 -> 构造归一化 source world pose -> 投影到 target hierarchy”这条主路径，但 formal 规格还没有把以下几类失败模式显式写成独立约束：
+
+1. 参考姿态 / bind pose 已经归一化，但动画局部轨道仍然隐式依赖重组前父子关系，导致局部轨道在新层级下语义改变。
+2. 某些映射骨骼没有拿到有效 baked payload，系统退回 bind local、time-zero 或 target reference pose，结果在资产层面“导入成功”，但运动层面等价于该骨骼被冻结。
+3. root / pelvis / wrapper 骨在对象空间额外 Z 轴 180° 后，根运动轨迹、角色朝向与肢体局部运动没有继续保持同一套归一化语义，导致整段动作方向、位移或落点看起来都错。
+4. hand / wrist / finger-root 之外的辅助分支，例如 weapon、sheath、dummy、twist 或 face-root 相关骨骼，如果在骨架重组后没有得到明确的 parent 策略和逐帧轨道重算，也会表现为“主链对了，但整段 Sekiro 动作还是不像原动作”。
+
+因此，本次变更的 formal 验收不能只要求“动画成功绑定到重映射后的 Skeleton”，而必须要求“导入后的 Sekiro 自身动画，在归一化后世界空间语义上与源动画等价”。只有这样，才能把“mesh/skeleton 正确但 self-animation 仍错位”从模糊观察，变成 formal hard-fail 条件。
+
 从当前实现来看，这个结论还有一层更具体的含义：`BuildHandComponentRotationRebases` / `ApplyComponentRotationRebasesToWorldMap` 目前直接修改的是 `Hand` 骨骼的 component rotation，然后再基于现有 world map 回推 local bind / local track；但它没有显式把同一 basis 修正传播为 finger-root subtree 的整体 world-space 旋转/位移更新。对于 palm basis 这类依赖 `Hand -> MiddleFingerRoot` 和 `IndexFingerRoot -> PinkyFingerRoot` 几何关系的验收，这意味着“只把 hand 自身朝向掰正”与“让整个 hand/finger subtree 的动态语义同步归一化”并不等价。右手已经回到阈值内而左手镜像侧仍失败，说明剩余缺口很可能就在这类 mirrored subtree propagation 语义上。
 
-这里提到的“targeted wrist compensation in the RTG build step”，并不是引入新的正式修复路径，而是一个受控的诊断实验：在 `build_sekiro_to_manny_retarget_assets.py` 中，对 target wrist 或 hand 相关链施加一组确定性的局部旋转补偿，用来判断 RTG 动态误差是否主要表现为常量腕部局部偏置。如果这种补偿能显著改善 palm basis 指标，那么它证明正式导入路径里仍缺少与 wrist basis 对齐等价的语义；反之，如果补偿无效，或者只能改善一侧而另一镜像侧仍失败，则问题更可能在镜像侧 hand/finger subtree 的局部轨道语义、局部基底传播或 probe 观测配置。无论结果如何，这种补偿都只能作为 post-import 诊断手段，不能构成 formal success，也不能替代 `SekiroImportCommandlet` 内的动画重算实现。
+这里提到的 wrist/hand 残差定位，不再允许通过 Python 构建器或 Python probe 完成。允许保留的只有 UE 原生 C++ 诊断与编辑器内人工复核：如果 palm basis 或 auxiliary branch world-space 指标仍异常，则必须把对应观测回写到 `SekiroImportCommandlet` 的 payload 覆盖、bind 重建、world-space 语义对比和报告聚合中，而不是继续维护额外脚本链路。
 
 因此本次变更应当删除这些冗余 commandlet/验证器，把必要能力整合进一个正式、单路径、不可回退的导入归一化流程。若需要检查结果，则在 import 结束后调用按需检查逻辑，而不是维持独立的长期并行 commandlet。
+
+### UE 原生诊断与人工复核必须替代脚本式旁路
+
+这一轮设计调整的核心不是再修一层 RTG builder，而是把之前散落在 Python probe、host validator、viewport scene driver 中的正式验收语义并回 C++ import 主链和 UE 原生人工复核流程。原因有三：
+
+1. 这些脚本只能观测正式导入后的结果，不能成为正式修复所在位置；
+2. 它们把成功判定拆散到了多个旁路，容易出现“脚本通过但正式资产合同不一致”；
+3. 用户已经明确要求正式路径禁止依赖任何 Python 代码，因此所有正式验收语义都必须落回 commandlet 报告、C++ post-import 检查和 UE 编辑器手工复核说明。
+
+因此新的设计收敛为两个层次：
+
+- `SekiroImportCommandlet` 在导入时直接完成 payload 覆盖检查、world-space 语义检查、hand basis 检查、root-motion delta 检查、representative auxiliary branch 检查，并把 clip 级与角色级聚合结果写进 `ue_import_report.json`。
+- 人工复核不再由脚本自动搭景，而是要求直接打开 canonical 内容路径下的 Skeleton、SkeletalMesh 和代表性动画，在 UE 编辑器中按固定关键帧做目视检查与抓帧记录。
+
+这样的好处是：脚本层即使被整体删除，正式路径仍然完整；而一旦人工复核发现问题，也能直接对应到 commandlet 报告中的 clip/bone/metric，而不是回溯一串额外脚本。
+
+### 当前 formal 回归范围固定为 canonical 17 动画批次
+
+当前变更的正式回归目标不再是 c0000 的整包 1248 个动画，而是 canonical 17 clip 预览批次。该范围已经由现有历史 formal run 收敛并复验通过，当前 clip 集为：
+
+- `a000_201030`
+- `a000_201050`
+- `a000_202010`
+- `a000_202011`
+- `a000_202012`
+- `a000_202035`
+- `a000_202100`
+- `a000_202110`
+- `a000_202112`
+- `a000_202300`
+- `a000_202310`
+- `a000_202400`
+- `a000_202410`
+- `a000_202600`
+- `a000_202610`
+- `a000_202700`
+- `a000_202710`
+
+正式 commandlet 必须支持以显式预设触发这组 clip，而不是每次手工复制一长串 filter。导入报告也必须显式记录当前 animation selection scope，避免同一路径下曾经跑过 1248 clip 全量导入后，再把旧 report 与 17 clip formal 结果混淆。
+
+与之相对，导入后的 Sekiro 自身动画里出现“主干骨架基本通过，但局部网格突然被某棵分支拉飞”的现象，则应单独归因为辅助分支问题，而不能再混入 RTG 手臂问题范畴。它更像是某些代表性辅助分支根（例如 clavicle、face_root、weapon_sheath）虽然仍存在于 Skeleton 中，但它们的 parent 语义、局部轨道语义或 descendant subtree world geometry 没有跟随主链一起完成重算。为避免这种问题继续被 `success=true` 掩盖，本次变更需要同时补上：
+
+- import report 中对代表性辅助分支 root 的显式 world-space 指标；
+- 一个面向辅助分支的独立 probe/validator，用来把网格尖刺定位到具体 branch root 和具体动画帧。
 
 约束如下：
 
 - 正式路径不能依赖猜测、兼容分支、人工后处理或“导入成功后再单独 retarget”。
 - 归一化必须同时覆盖模型、骨架、动画，不能只修骨架名字或只修动画轨道。
-- 动画归一化验收必须覆盖分支基底语义，尤其是 hand / wrist / finger-root 的掌面横向和掌面法线；不能只用 arm chain 主方向通过就视为动画重算正确。
-- hand / wrist / finger-root 分支的验收必须按左右侧独立记录；若一侧通过而另一镜像侧失败，必须继续把问题归因到 mirrored-side local-semantics 缺口，而不是以“整体已经接近”判定通过。
-- 如果 RTG 静态 pose 已通过而动态 animation validator 仍失败，必须把该失败解释为“动态局部轨道语义仍未完全证明正确”；禁止因为静态 pose 正确就把 formal import 或 retarget 视为完成。
-- 冗余 commandlet/验证器需要删除，不能在实现后继续保留与正式路径重复的旧代码。
 - 需要保留现有 formal import 的严格失败语义，任何缺失、歧义或结果不一致都必须硬失败。
 
 ## 目标 / 非目标
 
 **目标：**
-- 在 `SekiroImportCommandlet` 中引入明确的一步式 Humanoid Normalization 导入流程，并把它纳入正式导入成功条件。
 - 以一份确定性的归一化配置定义目标骨架父子关系、横向方向镜像矩阵规则和统一矩阵变换，使同一角色的模型、参考姿态和动画都经过完全一致的处理，并在 UE 中额外保持绕对象 Z 轴 180° 的最终朝向。
 - 在骨架重组后，重新计算参考姿态局部变换、bind pose / inverse bind pose，以及每个动画 clip 的逐帧局部骨骼轨道。
 - 删除 `SekiroRetargetCommandlet`、`SekiroHumanoidValidation`、`SekiroValidationCommandlet` 等重复职责代码，并把必要的检查改为 import 后按需执行的独立检查流程。
+
+本轮图中暴露的问题说明，这里的“重建 inverse bind pose”不能只停留在 Interchange scene-node 层的 joint bind 覆写。即使导入后的 `USkeleton` 参考姿态和 `UAnimSequence` world-space 语义已经通过，只要最终 `USkeletalMesh` 内部保存的 inverse bind 矩阵仍滞留在重写前状态，运行时 skinning 依然会把局部网格分区拉向错误的骨骼空间，表现为“动画看起来对，但蒙皮局部炸开/离体”。因此 formal 路径必须在资产生成后继续对 `USkeletalMesh` 自身执行 inverse bind 重建，并把代表性骨骼的 inverse bind 一致性纳入报告与 hard-fail 校验。
 - 扩展导入报告和 import 后检查，证明最终资产满足 Unreal Humanoid 组织、横向镜像结果正确性、方向正确性和动画绑定完整性。
 
 **非目标：**
@@ -112,6 +162,24 @@ $$
 - 仅对根骨做整体矩阵乘法。否决，因为用户要求骨架父子关系重组后所有受影响骨骼和动画帧都要重新计算。
 - 通过 `L_* <-> R_*` 命名表做骨骼交换。否决，因为目标不是按名字对调骨骼，而是沿角色横向方向做统一镜像矩阵变换。
 
+### 决策 3A：Sekiro 自身动画匹配必须以“归一化后世界运动等价”为准，而不是以“可播放”或“已绑定”为准
+
+对于 Sekiro 自身动画，formal 成功条件不是“`UAnimSequence` 已经绑定到重映射后的 `USkeleton` 并且在 UE 中能播放”，而是“导入后的动画在归一化后世界空间里，仍然表达与源动画同一段运动”。
+
+这意味着至少要同时满足以下条件：
+
+1. 对所有 formal 支持的映射骨骼，若源动画在该 clip 中存在 baked 轨道，则导入侧必须对该骨骼生成逐帧重算后的 local track；禁止静默回落到 bind pose、time-zero 或 target reference pose。
+2. 对 root / pelvis / torso / limb / hand / finger-root 等关键分支，导入后的每帧 target world pose 必须来自 source normalized world pose 在新层级下的严格回推，而不是 target ref pose 与部分 source pose 的混合结果。
+3. 对 root motion，formal 匹配必须验证导入后序列在对象空间中的根位移与朝向增量是否与归一化后的源动画一致；只保留肢体姿态而丢失根运动语义，或根运动方向在额外 Z 轴 180° 后与肢体运动脱节，都必须视为不匹配。
+4. 对辅助骨骼分支，formal 路径必须显式区分“正式支持并保持动画语义的骨骼”和“明确不支持、因此必须在配置期失败的骨骼”；禁止让关键辅助分支以未重算或 ref-pose 冻结的状态混入正式成功结果。
+
+从实现角度，这个决策还要求 formal 检查显式暴露两类最容易被掩盖的错误：
+
+- `coverage error`：源动画存在该骨骼的运动语义，但导入后缺少对应 baked local track。
+- `semantic drift`：导入后虽然存在轨道，但其 world-space 路径、方向、掌面基底、root motion 或辅助骨骼关系不再与源动画等价。
+
+前者需要靠 payload/轨道覆盖检查直接阻断；后者需要靠 frame-level source-vs-target 对比、root motion 对比和分支几何语义对比来阻断。
+
 ### 决策 4：模型归一化必须重建 bind pose，并修正镜像后的几何手性
 
 归一化后的 `USkeletalMesh` 不能只换一个 Skeleton 引用，而必须和新参考姿态一起重建：
@@ -132,21 +200,32 @@ $$
 post-import 检查至少覆盖：
 
 - 目标 Skeleton 的父子关系是否与归一化配置完全一致。
+- 人形主链检查必须覆盖完整 UE humanoid 主干，而不只是躯干链；至少包括 `Pelvis -> Spine -> Spine1 -> Spine2 -> Neck -> Head`、`L/R_Clavicle -> L/R_UpperArm -> L/R_Forearm -> L/R_Hand`、`L/R_Thigh -> L/R_Calf -> L/R_Foot`，并验证 `face_root -> Head`。
 - 横向镜像后的手臂、肩部和其他人形横向标志是否与归一化后的角色左/右语义一致，且最终对象空间结果已额外绕 Unreal Z 轴旋转 180°。
 - 每个导入动画是否绑定到归一化 Skeleton，且轨道集合覆盖所有必需骨骼。
+- 每个导入动画对 formal 支持的映射骨骼是否都拿到了有效 baked payload，并且没有以 bind local、time-zero 或 target reference pose 作为静默回退结果；如果存在这类回退，必须把 clip 标记为失败。
+- 每个导入动画在归一化后 world-space 中，是否保持了与源动画一致的 root motion 位移与朝向增量；若根轨迹、朝向或落点在额外 Z 轴 180° 后仍与肢体运动语义脱节，必须失败。
 - 每个导入动画在 hand / wrist / finger-root 分支上的掌面前向、掌面横向和掌面法线是否与源动画归一化目标一致，而不是只通过上臂/前臂链段方向检查。
 - 上述 hand / wrist / finger-root 指标是否按左右侧分别记录、分别比较，并在一侧通过另一侧失败时直接暴露侧别差异，而不是折叠成一个总分或单一 wrist offset 假设。
+- 每个导入动画在 torso、head、foot、weapon / sheath / dummy 等代表性分支上的 world-space 关键点是否仍与源动画保持一致；如果某分支由于 parent 重组或轨道缺失而退回 reference-like 静止状态，必须在报告中以 clip/bone 级别暴露。
 - 模型的参考姿态、网格 bounds 和脚底落点是否仍满足当前可见姿态/grounding 约束。
 - 导入报告是否记录源数据读取、内存归一化、最终资产生成、检查失败点的分阶段结果。
 
-`RTG_*` pose / animation probes 可以继续保留，但它们在规范中属于 post-import 诊断与验收工具。若 probe 暴露 wrist/hand 问题，修复应回到 `SekiroImportCommandlet::RewriteAnimationFromTranslatedSource` 及其共享归一化数据，而不是改由正式 retarget 资产兜底。
+其中，Sekiro 特有的 `L/R_Shoulder`、`L/R_Knee` 等中间骨不得再充当 UE humanoid 主链节点。它们可以作为保留的辅助分支继续存在，但正式主链必须直接由 `Clavicle/UpperArm/Forearm/Hand` 与 `Thigh/Calf/Foot` 语义承担；如果 post-import probe 仍观察到旧的 Sekiro 中间骨在主链位置上“卡住”了层级，则这属于 import 主链失败，而不是 RTG 可接受残差。
 
-若需要在 RTG builder 中增加针对 wrist 的定向补偿、额外日志或持久化探针，其唯一允许目的也是帮助判断剩余误差是否属于恒定局部 wrist basis 偏置。该类补偿必须满足：
+其中，针对 Sekiro 自身动画的检查顺序必须固定为：
 
-- 必须是显式、确定性、可关闭的诊断实验，而不是隐式兜底逻辑。
-- 必须在设计和报告里标识为 RTG 诊断步骤，而不是 formal import 或 final retarget success 的一部分。
-- 一旦实验确认了缺失的旋转语义，正式修复必须回写到 import commandlet 的归一化配置、bind pose 重建或逐帧局部轨道重算流程。
-- 如果实验没有改善指标，则必须撤回该诊断补偿，继续从骨架拓扑、轨道语义或 probe 定义上定位，而不是把无效补偿长期留在 RTG 构建脚本里。
+1. `资产绑定检查`：Skeleton 绑定、sample rate、frame count、轨道数量、formal 支持骨骼覆盖是否完整。
+2. `轨道覆盖检查`：是否存在 mapped animated bone 缺少 baked payload、被静默回退到 bind/reference pose、或整段 clip 上保持异常平坦的情况。
+3. `世界语义检查`：source normalized world pose 与 imported target world pose 在 root motion、torso/limb direction、hand basis、代表性辅助分支上的差异是否低于阈值。
+4. `人工复核检查`：对代表性 clip 做 source-vs-imported 并排预览，确认 formal validator 没有漏掉明显动作错义。
+
+- UE 原生人工复核必须绑定 canonical 内容路径和关键帧采样协议。复核说明至少要覆盖：
+
+- 打开 `/Game/SekiroAssets/Characters/<chr>/Mesh/...` 下的 SkeletalMesh 和 Skeleton，确认骨架树层级与 bind pose。
+- 打开 `/Game/SekiroAssets/Characters/<chr>/Animations/...` 下的代表性动画，选取待机、位移/转身、攻击、持武器/收刀、明显手部语义 clip。
+- 对每个 clip 在首帧、中段和末段至少取 3 个关键帧，检查 torso、双手、双脚、face_root / weapon_sheath 等代表性分支。
+- 将抓帧文件路径、资产路径和观察结论写回验收记录，而不是只在终端里说“看起来正常”。
 
 这意味着现有 `ValidateImportedVisibleHumanoidPose` 一类逻辑不能以原样保留为独立组件；若其中有必要规则，应重写或并入新的 post-import 检查实现。
 

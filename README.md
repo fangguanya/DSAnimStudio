@@ -133,20 +133,27 @@ SekiroExporter.exe export-all --game-dir "C:\Program Files (x86)\Steam\steamapps
 "D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" SekiroSkillEditor.uproject -run=SekiroImport -ExportDir=E:\Sekiro\Export -ChrFilter=c0000 -unattended -nopause -nosplash -nullrhi
 ```
 
-### Validate formal imported self-test assets
+### Build UE plugin after C++ import changes
 ```
-"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" SekiroSkillEditor.uproject -ExecutePythonScript=E:\Sekiro\DSAnimStudio\tools\_formal_import_selftest_probe.py -nopause -nosplash
-python E:\Sekiro\DSAnimStudio\tools\validate_formal_import_selftest.py
-```
-
-### Validate Sekiro to Manny retarget pose
-```
-"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" SekiroSkillEditor.uproject -ExecutePythonScript=E:\Sekiro\DSAnimStudio\tools\_retarget_pose_preview_probe.py -nopause -nosplash
-"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" SekiroSkillEditor.uproject -ExecutePythonScript=E:\Sekiro\DSAnimStudio\tools\_retarget_animation_selftest_probe.py -nopause -nosplash
-python E:\Sekiro\DSAnimStudio\tools\validate_retarget_pose_diagnostic.py
+"D:\UE_OFFICIAL\UE_5.7\Engine\Build\BatchFiles\Build.bat" SekiroSkillEditorEditor Win64 Development E:\Sekiro\DSAnimStudio\SekiroSkillEditor\SekiroSkillEditor.uproject
 ```
 
-### Validate host-side threshold logic
+### Run formal UE import and inspect report
 ```
-python E:\Sekiro\DSAnimStudio\tools\test_formal_validation.py
+"D:\UE_OFFICIAL\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" SekiroSkillEditor.uproject -run=SekiroImport -ExportDir=E:\Sekiro\Export -ChrFilter=c0000 -unattended -nopause -nosplash -nullrhi
 ```
+
+检查 `E:\Sekiro\Export\c0000\ue_import_report.json` 中的：
+
+- `postImportChecks`
+- `skeletalMeshValidation`
+- `animationValidation`
+- `selfAnimationValidation`
+
+### Manual UE editor review
+在 UE 编辑器中直接打开 canonical 内容路径下的资产：
+
+- `/Game/SekiroAssets/Characters/c0000/Mesh/...`
+- `/Game/SekiroAssets/Characters/c0000/Animations/...`
+
+对 Skeleton、SkeletalMesh 和代表性动画在首帧、中段和末段做并排复核与抓帧。流程细节见 `.claude/skills/ue-native-import-review/SKILL.md`。

@@ -12,39 +12,24 @@
 
 ## 新增需求
 
-### 需求:Python批量FBX导入脚本
-系统必须提供 Python 脚本，通过 UE5 Python API 批量导入导出的 FBX 文件。
+### 需求:UE 导入必须由正式 Commandlet 批量处理
+系统必须通过 `SekiroImportCommandlet` 批量导入 formal 导出产物，禁止再依赖 UE Python 脚本批量导入模型、纹理或动画。
 
-#### 场景:批量导入骨骼网格
-- **当** 用户在 UE5 Editor 中运行 batch_import.py 并指定导出目录
-- **那么** 脚本必须扫描目录下所有 `*_model.fbx` 文件，使用 `unreal.AssetTools.import_asset_tasks()` 导入为 SkeletalMesh 资产，导入路径按角色 ID 组织（如 `/Game/Sekiro/Characters/c0000/`）
+#### 场景:批量导入骨骼网格与纹理
+- **当** 用户对 formal 导出目录运行 `SekiroImportCommandlet`
+- **那么** commandlet 必须按角色 ID 组织内容路径，正式导入 SkeletalMesh、Skeleton、纹理与材质实例，并将模型导入与 post-import 校验写入统一报告
 
 #### 场景:批量导入动画
-- **当** 脚本处理角色的 Animations/ 目录
-- **那么** 必须将每个 `.fbx` 动画文件导入为 UAnimSequence 资产，关联到对应角色的 Skeleton 资产，导入路径为 `/Game/Sekiro/Characters/<chrID>/Animations/`
+- **当** commandlet 处理角色的 Animations deliverable
+- **那么** 它必须为每个正式动画生成绑定到 canonical Skeleton 的 `UAnimSequence`，并在同一次导入中完成轨道重写、payload 覆盖检查与 world-space 语义检查
 
-#### 场景:批量导入纹理
-- **当** 脚本处理角色的 Textures/ 目录
-- **那么** 必须将每个 PNG/DDS 文件导入为 UTexture2D 资产，Normal Map 类型的纹理必须设置 `CompressionSettings` 为 `TC_Normalmap`，导入路径为 `/Game/Sekiro/Characters/<chrID>/Textures/`
+### 需求:材质与技能配置必须由正式导入链路完成
+系统必须由正式导入链路完成材质实例创建、纹理绑定和技能 JSON 到数据资产的转换，禁止继续依赖独立 Python 脚本。
 
-### 需求:材质自动配置脚本
-系统必须提供 Python 脚本，根据材质清单自动创建和配置 UE5 材质实例。
-
-#### 场景:创建材质实例
-- **当** 用户运行 setup_materials.py 并指定 material_manifest.json
-- **那么** 脚本必须为清单中的每个材质创建 UMaterialInstanceConstant，基于一个预定义的 Master Material（支持 BaseColor/Normal/Specular/Emissive 纹理槽位）
-
-#### 场景:自动分配纹理
-- **当** 创建材质实例时
-- **那么** 脚本必须根据清单中的纹理映射，将已导入的 UTexture2D 资产分配到材质实例的对应槽位（BaseColor → TextureParameterValue "BaseColor"，Normal → "Normal"，Specular → "Specular"，Emissive → "Emissive"）
-
-### 需求:技能配置导入脚本
-系统必须提供 Python 脚本，将导出的技能 JSON 转换为 UE5 数据资产。
+#### 场景:创建材质实例并分配纹理
+- **当** commandlet 读取 `material_manifest.json`
+- **那么** 它必须通过 C++ 导入逻辑创建 `UMaterialInstanceConstant`，并将导入纹理绑定到对应参数槽位
 
 #### 场景:创建技能数据资产
-- **当** 用户运行 import_skill_configs.py 并指定 skill_config.json
-- **那么** 脚本必须解析 JSON 中每个动画的事件数据，创建对应的 USekiroSkillDataAsset 实例，自动关联已导入的 UAnimSequence 资产（通过动画文件名匹配）
-
-#### 场景:处理大量技能数据
-- **当** JSON 文件包含数百个动画的事件数据
-- **那么** 脚本必须正确处理全部数据，对每个动画创建独立的数据资产，并在 Content Browser 中按类别组织（`/Game/Sekiro/Skills/<Category>/`）
+- **当** commandlet 读取 formal `skill_config.json`
+- **那么** 它必须创建对应的 `USekiroSkillDataAsset`，并关联已导入的 `UAnimSequence`，同时把缺失关联作为 warning 或 error 写入正式报告

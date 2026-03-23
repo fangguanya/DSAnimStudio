@@ -7,7 +7,7 @@
 /**
  * Commandlet to batch import Sekiro exported assets (textures, models, animations).
  * Only glTF 2.0 (.gltf/.glb) and PNG are accepted as formal inputs.
- * Usage: UnrealEditor-Cmd.exe project.uproject -run=SekiroImport -ExportDir="E:/Sekiro/Export" [-ChrFilter=c1020,c1000]
+ * Usage: UnrealEditor-Cmd.exe project.uproject -run=SekiroImport -ExportDir="E:/Sekiro/Export" [-ChrFilter=c1020,c1000] [-Canonical17Only]
  */
 UCLASS()
 class USekiroImportCommandlet : public UCommandlet
