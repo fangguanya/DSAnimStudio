@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.7",
+	"EngineAssociation": "{B15D60A5-499F-0928-D5C6-1FAE812D7673}",
 	"Category": "Games",
 	"Description": "Sekiro Skill Editor - Visualize and edit Sekiro combat skills",
 	"Modules": [
